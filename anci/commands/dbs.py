@@ -1,0 +1,836 @@
+"""Databases: migrate, litestream, regen, and the dev-machine-side verbs.
+
+Design points:
+- a db is materialized per env **on demand by `migrate`** — deploy
+  never touches db files, it only injects their paths as env vars
+- pending migrations = glob order minus rows in the guest's `_anci_migrations`
+  table; each migration is wrapped in a transaction (migrations must NOT
+  contain BEGIN/COMMIT — anci owns the transaction)
+- extensions ship to the content-addressed blob store and are symlinked into
+  the db's ext *directory* before migrations run (one may be `.load`ed); the
+  app is pointed at that directory, and an extension dropped from the conf is
+  pruned from it. Same model as converge (`anci/converge/dbs.py`)
+- litestream is a pinned binary pushed like any artifact; one unit per env,
+  one yaml listing all of that env's dbs; replicas are s3-compatible
+  stores only (AWS S3, or anything else via its endpoint — R2, MinIO, …)
+- secrets: you keep `.anci/secrets.<env>.env` locally (git-ignored); anci is a
+  courier — it uploads the file mode 600 if present
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import shlex
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .. import apply as apply_mod
+from .. import auth, bin as bin_mod, boxlock, errors, paths, scratch, ssh, ui, units
+from .. import versions as versions_mod
+from ..converge import dbs as converge_dbs, lifecycle, run as converge_run, vendored
+from ..apply import LinkArtifact
+from ..converge.context import BlobUpload
+from ..render import litestream, shell
+from ..layout import ANCI_GROUP, ANCI_USER
+from .. import secrets as secrets_mod
+from ..conf import conf_path
+from .. import layout
+from ..conf import Conf, Db
+
+
+BOOKKEEPING_TABLE = "_anci_migrations"
+
+# How long anci's sqlite3 calls wait on a lock an app holds before failing; the CLI's own default is not to
+# wait at all. Apps keep running through `migrate`, so without it a write landing at the same moment fails it.
+SQLITE_TIMEOUT_MS = 10_000
+
+
+def sqlite3_cmd(db_file: str, *, bail: bool = False) -> str:
+    """The sqlite3 CLI against a box's db, as the shared `anci` user (every db's owner)."""
+    return (f"sudo -n -u {ANCI_USER} sqlite3{' -bail' if bail else ''} "
+            f"-cmd '.timeout {SQLITE_TIMEOUT_MS}' {db_file}")
+
+
+# ---------------------------------------------------------------------------
+# paths (deterministic, anci-owned)
+
+
+# ---------------------------------------------------------------------------
+# secrets (courier only — you author them locally)
+
+
+# ---------------------------------------------------------------------------
+# migrations
+
+
+def list_migrations(db) -> list[tuple[str, Path]]:
+    """(migration-name, path) in filename order. Name = filename without .sql."""
+    d = Path(db.migrations)
+    if not d.is_dir():
+        raise errors.ConfError(
+            f"migrations directory '{db.migrations}' doesn't exist",
+            why=f"that's what [db.{db.name}] points at in anci.toml",
+            try_="create it, or fix 'migrations' in anci.toml",
+        )
+    files = sorted(d.glob("*.sql"), key=lambda p: p.name)
+    return [(p.stem, p) for p in files]
+
+
+def anchored_migrations(conf, db) -> list[tuple[str, Path]]:
+    """list_migrations with the conf's path anchoring applied."""
+    d = conf_path(conf, db.migrations)
+    if not d.is_dir():
+        raise errors.ConfError(
+            f"migrations directory '{db.migrations}' doesn't exist",
+            why=f"that's what [db.{db.name}] points at in anci.toml",
+            try_="create it (relative to your anci.toml), or fix 'migrations' in anci.toml",
+        )
+    return [(p.stem, p) for p in sorted(d.glob("*.sql"), key=lambda p: p.name)]
+
+
+def _checksum(path: Path) -> str:
+    """sha256 of a migration file's bytes (the recorded, immutable hash)."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _q(value: str) -> str:
+    """A single-quoted SQL string literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _sqlite(conn: ssh.Conn, db_file: str, sql: str, *, check: bool = True) -> str:
+    """One statement against a box's db, as the shared `anci` user (every db's
+    owner); returns stdout. `check=False`: a failure reads as empty output."""
+    cmd = f"{sqlite3_cmd(db_file, bail=True)} {shlex.quote(sql)}"
+    return ssh.script(conn, cmd if check else f"{cmd} 2>/dev/null || true").stdout
+
+
+def _bookkeeping_columns(conn, db_file) -> set[str] | None:
+    """The bookkeeping table's columns, or None when the table doesn't exist."""
+    out = _sqlite(conn, db_file, f"SELECT name FROM pragma_table_info('{BOOKKEEPING_TABLE}');",
+                  check=False)
+    return {line.strip() for line in out.splitlines() if line.strip()} or None
+
+
+# tables that aren't a user schema: sqlite's own, anci's bookkeeping, and the
+# `_litestream_seq` / `_litestream_lock` litestream writes into a db it replicates
+_USER_TABLES_SQL = (
+    "SELECT name FROM sqlite_master WHERE type='table' "
+    "AND name NOT LIKE 'sqlite_%' "
+    f"AND name != '{BOOKKEEPING_TABLE}' "
+    "AND name NOT LIKE '\\_litestream\\_%' ESCAPE '\\' "
+    "ORDER BY name;"
+)
+
+
+def _user_tables(conn, db_file) -> list[str]:
+    """Tables of a schema anci didn't create (empty for a fresh or anci-owned db)."""
+    out = _sqlite(conn, db_file, _USER_TABLES_SQL, check=False)
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _applied_checksums(conn, db_file) -> dict[str, str | None]:
+    """name -> recorded checksum (None for rows predating the checksum column)."""
+    out = _sqlite(conn, db_file,
+                  f"SELECT name||char(9)||coalesce(checksum,'') FROM {BOOKKEEPING_TABLE};",
+                  check=False)
+    applied: dict[str, str | None] = {}
+    for line in out.splitlines():
+        name, _, checksum = line.partition("\t")
+        if name.strip():
+            applied[name.strip()] = checksum.strip() or None
+    return applied
+
+
+def _upgrade_bookkeeping(conn, db_file) -> None:
+    """Add the checksum column to a bookkeeping table that predates it."""
+    _sqlite(conn, db_file, f"ALTER TABLE {BOOKKEEPING_TABLE} ADD COLUMN checksum TEXT;")
+
+
+def _delete_bookkeeping(conn, db_file, names: list[str]) -> None:
+    quoted = ",".join(_q(n) for n in names)
+    _sqlite(conn, db_file, f"DELETE FROM {BOOKKEEPING_TABLE} WHERE name IN ({quoted});")
+
+
+def _set_checksums(conn, db_file, checksums: dict[str, str]) -> None:
+    for name, checksum in checksums.items():
+        _sqlite(conn, db_file, f"UPDATE {BOOKKEEPING_TABLE} SET checksum = {_q(checksum)} "
+                               f"WHERE name = {_q(name)};")
+
+
+def _migration_script(
+    db_name: str, pending: list[tuple[str, Path]], ext_paths: list[str],
+    checksums: dict[str, str],
+) -> str:
+    lines = []
+    for ext in ext_paths:
+        lines.append(f".load {ext}")
+    # incremental auto-vacuum lets apps hand freed pages back (`PRAGMA incremental_vacuum`) instead of the
+    # file only ever growing. It only takes on a db with no tables yet, so it lands on new dbs and is a no-op
+    # on existing ones; and it goes before journal_mode, which would otherwise leave it pending a VACUUM.
+    lines.append("PRAGMA auto_vacuum=INCREMENTAL;")
+    # every db is WAL: litestream needs it, and readers aren't blocked by a writer. Set here, outside the
+    # migrations' transactions (where journal_mode can't change); persistent, and a no-op once set.
+    lines.append("PRAGMA journal_mode=WAL;")
+    lines.append(
+        f"CREATE TABLE IF NOT EXISTS {BOOKKEEPING_TABLE} "
+        f"(name TEXT PRIMARY KEY, checksum TEXT NOT NULL, ts TEXT NOT NULL);"
+    )
+    for name, _ in pending:
+        # anci owns the transaction: BEGIN..COMMIT around the whole migration
+        lines.append("BEGIN;")
+        lines.append(f".read {mig_remote(db_name, name)}")
+        lines.append(
+            f"INSERT INTO {BOOKKEEPING_TABLE} (name, checksum, ts) "
+            f"VALUES ({_q(name)}, {_q(checksums[name])}, datetime('now'));"
+        )
+        lines.append("COMMIT;")
+    return "\n".join(lines) + "\n"
+
+
+# the box's scratch dir for one run's migration files (readable by the `anci` user)
+MIG_DIR = f"/tmp/.anci-mig-{scratch.RUN_ID}"
+
+
+def mig_remote(db_name: str, name: str) -> str:
+    """The box's scratch copy of one migration file (the script `.read`s it)."""
+    return f"{MIG_DIR}/{shq_name(db_name)}-{shq_name(name)}.sql"
+
+
+def shq_name(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]", "-", name)
+
+
+@dataclass
+class _DbRun:
+    """One db's part of a `migrate` run."""
+    name: str
+    db: Db
+    file: str                                    # the db's path on the box
+    migrations: list[tuple[str, Path]]
+    checksums: dict[str, str]
+    ext_paths: list[str] = field(default_factory=list)
+    pending: list[tuple[str, Path]] = field(default_factory=list)
+
+
+def migrate(conf: Conf, db_name: str | None, env_name: str, *, baseline: bool = False) -> int:
+    """Apply `db_name`'s (None: every db's) pending migrations — every db in one
+    pass, batched into a few round trips — then converge the env once."""
+    names = [db_name] if db_name is not None else sorted(conf.dbs)
+    if not names:
+        raise errors.ConfError("there are no dbs to migrate",
+                               try_="add a [db.<name>] table to anci.toml")
+    for name in names:
+        if name not in conf.dbs:
+            raise errors.ConfError(
+                f"db '{name}' isn't in anci.toml",
+                why=f"defined dbs: {', '.join(sorted(conf.dbs)) or '(none)'}",
+                try_=f"add [db.{name}] to anci.toml",
+            )
+    if env_name not in conf.envs:
+        raise errors.ConfError(f"env '{env_name}' isn't in anci.toml")
+    env = conf.envs[env_name]
+    # local reads first: a missing migrations dir fails before the box is touched
+    runs = []
+    for name in names:
+        migrations = anchored_migrations(conf, conf.dbs[name])
+        runs.append(_DbRun(name=name, db=conf.dbs[name], file=layout.db_path(name),
+                           migrations=migrations,
+                           checksums={n: _checksum(path) for n, path in migrations}))
+    user = auth.authorize(conf, env_name)
+    conn = ssh.connect(conf, env_name, user)
+    ssh.wait_ready(conn)   # a fresh box races cloud-init otherwise (auth / apt lock)
+    # held through the converge at the end too (the lock is re-entrant)
+    with boxlock.hold(conn, user, f"migrate {db_name or 'all dbs'}"):
+        label = db_name or "migrations"
+        print(f"\n  {ui.bold(label)} {ui.dim('→')} {ui.bold(env_name)} {ui.dim(f'({conn.ip})')}\n")
+        pipe = ui.Pipeline()
+        _prepare(conn, env, runs, pipe)
+        _extensions(conf, conn, runs, pipe)
+        _check_history(conn, env_name, runs, pipe, baseline=baseline)
+        _apply(conn, env_name, runs, pipe)
+        _verify(conn, runs, pipe)
+        pipe.done()
+        # converge the env's infra: litestream, units, secrets, caddy, orphans —
+        # the schemas are this verb's only unique work. No binaries: apps come
+        # up via deploy, not migrate.
+        from ..converge import converge
+
+        converge(conf, env_name)
+    return 0
+
+
+def _prepare(conn: ssh.Conn, env, runs: list[_DbRun], pipe: ui.Pipeline) -> None:
+    """One root script: the shared `anci` account (every db's owner — migrate
+    runs before deploy by convention), the layout, each db's dirs, and dropped
+    extensions pruned. Says whether the box still needs sqlite3."""
+    lines = ["set -e", *shell.ANCI_ACCOUNT_CMDS, *shell.layout_commands()]
+    for r in runs:
+        lines.append(f"install -d -o {ANCI_USER} -g {ANCI_GROUP} -m 0750 {layout.ext_dir(r.name)}")
+        lines.append(f"install -d -o {ANCI_USER} -g {ANCI_USER} -m 0750 {layout.db_dir(r.name)}")
+        if not r.db.extensions:
+            lines.append(converge_dbs.prune_script(layout.ext_dir(r.name), []))
+    lines.append(f"[ -x {shlex.quote(layout.SQLITE_BIN)} ] || command -v sqlite3 >/dev/null "
+                 "|| echo need-sqlite3")
+    if "need-sqlite3" not in ssh.sudo(conn, "\n".join(lines)).stdout:
+        return
+    # `up`'s converge ships the vendored sqlite3, but migrate can be the first
+    # verb on a fresh box: push the same pinned binary, no package manager
+    step = pipe.step("installing sqlite3 on the box")
+    dl = vendored.sqlite_download(versions_mod.get(versions_mod.load(), env.anci_version))
+    if dl is None:
+        raise errors.ConfError(f"anci-version {env.anci_version} pins no sqlite3 binary")
+    local = bin_mod.vendor(dl.url, dl.sha512, dl.sha256, dl.name,
+                           paths.bin_cache_dir(), extract=dl.extract)
+    step.note(converge_run.upload_note(1, local.stat().st_size))
+    tmp = scratch.remote("sqlite3")
+    ssh.put(conn, str(local), tmp)
+    ssh.sudo(conn, f"install -m {dl.mode} {shlex.quote(tmp)} {shlex.quote(dl.dest)} "
+                   f"&& rm -f {shlex.quote(tmp)}")
+    step.done()
+
+
+def _extensions(conf: Conf, conn: ssh.Conn, runs: list[_DbRun], pipe: ui.Pipeline) -> None:
+    """Every db's extensions, to the blob store and symlinked into its ext dir —
+    before migrations, since one may `.load` them. Same model as converge/dbs.py."""
+    with_ext = [r for r in runs if r.db.extensions]
+    if not with_ext:
+        return
+    step = pipe.step("extensions")
+    blobs, links, prunes = [], [], []
+    for r in with_ext:
+        files = [conf_path(conf, e) for e in r.db.extensions]
+        absent = [e for e, f in zip(r.db.extensions, files) if not f.is_file()]
+        if absent:
+            raise errors.AppError(
+                f"{absent[0]} doesn't exist",
+                why=f"that's an extension listed under [db.{r.name}]",
+                try_="build/obtain it, or remove it from 'extensions'",
+            )
+        ext_dir = layout.ext_dir(r.name)
+        prunes.append(converge_dbs.prune_script(ext_dir, [f.name for f in files]))
+        for f in files:
+            sha = apply_mod.sha256_file(f)
+            blobs.append(BlobUpload(exe_name=r.name, local_path=f,
+                                    dest=layout.blob_path(sha), sha=sha))
+            links.append(LinkArtifact(path=f"{ext_dir}/{f.name}", target=layout.blob_path(sha)))
+            r.ext_paths.append(f"{ext_dir}/{f.name}")
+    ssh.sudo(conn, "\n".join(prunes))
+    _, targets, exists = apply_mod.probe(conn, [], [l.path for l in links],
+                                         deletes=[b.dest for b in blobs])
+    count, size = converge_run.pending_uploads(blobs, exists)
+    if count:
+        step.note(converge_run.upload_note(count, size))
+    up = sum(1 for b in blobs if converge_run.upload_blob(conn, b, None, exists))
+    result = apply_mod.apply(conn, [], links, probe_result=({}, targets, {}))
+    step.done(f"{up} uploaded, {ui.human_size(size)}" if up
+              else ("relinked" if result.changed_links else "unchanged"))
+
+
+def _read_history(conn: ssh.Conn, runs: list[_DbRun]) -> dict[str, tuple]:
+    """db -> (bookkeeping columns or None, user tables, applied name -> checksum),
+    for every db in one round trip."""
+    def query(r: _DbRun, sql: str) -> str:
+        return f"{sqlite3_cmd(r.file, bail=True)} {shlex.quote(sql)}"
+    probes = {}
+    for r in runs:
+        probes[f"{r.name} cols"] = query(
+            r, f"SELECT name FROM pragma_table_info('{BOOKKEEPING_TABLE}');")
+        probes[f"{r.name} tables"] = query(r, _USER_TABLES_SQL)
+        probes[f"{r.name} applied"] = query(
+            r, f"SELECT name||char(9)||coalesce(checksum,'') FROM {BOOKKEEPING_TABLE};")
+    found = ssh.facts(conn, probes)
+    history = {}
+    for r in runs:
+        cols = {c.strip() for c in found.get(f"{r.name} cols", []) if c.strip()} or None
+        tables = [t.strip() for t in found.get(f"{r.name} tables", []) if t.strip()]
+        applied: dict[str, str | None] = {}
+        for line in found.get(f"{r.name} applied", []):
+            name, _, checksum = line.partition("\t")
+            if name.strip():
+                applied[name.strip()] = checksum.strip() or None
+        history[r.name] = (cols, tables, applied)
+    return history
+
+
+def _check_history(conn: ssh.Conn, env_name: str, runs: list[_DbRun], pipe: ui.Pipeline,
+                   *, baseline: bool) -> None:
+    """Validate each db's files against its checksummed bookkeeping (baselining
+    when asked), and work out what's pending."""
+    history = _read_history(conn, runs)
+    for r in runs:
+        cols, tables, applied = history[r.name]
+        if cols is None:
+            if tables:
+                raise errors.EnvError(
+                    f"{r.name} has a schema but no anci migration bookkeeping",
+                    why=f"anci only migrates dbs it created (checksums need a history); "
+                        f"found table(s): {', '.join(tables)}",
+                    try_="recreate the db, or start from a fresh one",
+                )
+            applied = {}
+        elif "checksum" not in cols:
+            if not baseline:
+                raise errors.EnvError(
+                    f"{r.name}'s migration bookkeeping predates checksums",
+                    why="anci can't verify the applied history without them",
+                    try_=f"upgrade it: anci {env_name} migrate {r.name} --baseline",
+                )
+            _upgrade_bookkeeping(conn, r.file)
+            applied = _applied_checksums(conn, r.file)
+
+        missing = sorted(n for n in applied if n not in r.checksums)
+        modified = sorted(n for n in applied
+                          if n in r.checksums and applied[n] != r.checksums[n])
+        if baseline and (missing or modified):
+            step = pipe.step(f"baselining {r.name}'s migration history")
+            if missing:
+                _delete_bookkeeping(conn, r.file, missing)
+            if modified:
+                _set_checksums(conn, r.file, {n: r.checksums[n] for n in modified})
+            step.done(f"{len(modified)} updated, {len(missing)} forgotten")
+            for n in modified:
+                print(f"  {ui.yellow('⚠')} accepted the current {n}")
+            for n in missing:
+                print(f"  {ui.yellow('⚠')} forgot {n} (its file is gone)")
+            applied = _applied_checksums(conn, r.file)
+        if missing and not baseline:
+            raise errors.EnvError(
+                f"{r.name}: {len(missing)} applied migration(s) are no longer on disk",
+                why="\n".join(missing),
+                try_=f"restore the file(s), or "
+                     f"`anci {env_name} migrate {r.name} --baseline` to forget them",
+            )
+        if modified and not baseline:
+            raise errors.EnvError(
+                f"{r.name}: {len(modified)} migration(s) changed after they were applied",
+                why="\n".join(modified),
+                try_=f"add a new migration instead, or "
+                     f"`anci {env_name} migrate {r.name} --baseline` to accept the files",
+            )
+        # pending = glob order minus the recorded history (everything on a new db)
+        r.pending = [(n, path) for n, path in r.migrations if n not in applied]
+
+
+def _heredoc(path: str, content: bytes) -> bytes:
+    """Shell that writes `content` to `path` verbatim (a quoted heredoc)."""
+    delim = "ANCI_EOF_" + hashlib.sha256(content).hexdigest()[:16]
+    while delim.encode() in content:
+        delim += "_"
+    body = content if content.endswith(b"\n") or not content else content + b"\n"
+    return f"cat > {shlex.quote(path)} <<'{delim}'\n".encode() + body + f"{delim}\n".encode()
+
+
+def _bundle(runs: list[_DbRun], cleanup: str) -> bytes:
+    """One script applying every db's pending migrations, in order: it writes
+    the migration files and each db's sqlite3 script, then runs them. Stops at
+    the first db that fails (naming it on stderr); later dbs aren't touched."""
+    todo = [r for r in runs if r.pending]
+    out = [b"set -e", b"umask 022",
+           f"rm -rf {MIG_DIR}; mkdir {MIG_DIR}".encode(),
+           f"trap 'rm -rf {MIG_DIR} {cleanup} || true' EXIT".encode()]
+    for r in todo:
+        for name, path in r.pending:
+            out.append(_heredoc(mig_remote(r.name, name), path.read_bytes()).rstrip(b"\n"))
+        script = _migration_script(r.name, r.pending, r.ext_paths, r.checksums)
+        out.append(_heredoc(f"{MIG_DIR}/{shq_name(r.name)}.script", script.encode()).rstrip(b"\n"))
+    for r in todo:
+        out.append(f"{sqlite3_cmd(r.file, bail=True)} < {MIG_DIR}/{shq_name(r.name)}.script "
+                   f"|| {{ echo 'anci-failed {r.name}' >&2; exit 1; }}".encode())
+    return b"\n".join(out) + b"\n"
+
+
+def _apply(conn: ssh.Conn, env_name: str, runs: list[_DbRun], pipe: ui.Pipeline) -> None:
+    """Ship every pending migration in one upload and run them in one call —
+    as the shared `anci` service user (each db's owner)."""
+    step = pipe.step("applying migrations")
+    todo = [r for r in runs if r.pending]
+    if not todo:
+        total = sum(len(r.migrations) for r in runs)
+        step.skip(f"up to date ({total} applied)")
+        return
+    remote = scratch.remote("mig-bundle")
+    bundle = _bundle(runs, remote)
+    step.note(converge_run.upload_note(1, len(bundle)))
+    local = scratch.local("mig-bundle")
+    local.write_bytes(bundle)
+    try:
+        ssh.put(conn, str(local), remote)
+    finally:
+        local.unlink(missing_ok=True)
+    try:
+        ssh.script(conn, f"bash {remote}")
+    except ssh.SSHError as e:
+        if e.unreachable or e.auth or e.host_key:
+            raise
+        failed_db = next((r for r in todo if f"anci-failed {r.name}" in (e.stderr or "")), None)
+        if failed_db is None:
+            raise
+        # each migration is its own transaction: the ones before the failing
+        # one are committed — read the bookkeeping back to say which
+        now = _applied_checksums(conn, failed_db.file)
+        done = [n for n, _ in failed_db.pending if n in now]
+        failed = next((n for n, _ in failed_db.pending if n not in now), "?")
+        before = [r.name for r in todo[:todo.index(failed_db)]]
+        why = [f"applied in this run before it: {', '.join(done)}" if done
+               else f"nothing was applied to {failed_db.name} in this run; it's as it was"]
+        if before:
+            why.append(f"dbs fully migrated before it: {', '.join(before)}")
+        raise errors.EnvError(
+            f"{failed_db.name}: migration {failed} failed — its transaction was rolled back",
+            why="\n".join(why),
+            try_=f"fix {failed}.sql and re-run: anci {env_name} migrate",
+            debug=e.stderr or str(e),
+        ) from None
+    count = sum(len(r.pending) for r in todo)
+    if len(todo) == 1:
+        detail = f"{count} applied: {', '.join(n for n, _ in todo[0].pending)}"
+    else:
+        detail = f"{count} applied: " + ", ".join(f"{r.name} {len(r.pending)}" for r in todo)
+    step.done(detail)
+
+
+def _verify(conn: ssh.Conn, runs: list[_DbRun], pipe: ui.Pipeline) -> None:
+    """One round trip: integrity, planner stats and foreign keys for each db a
+    migration changed, plus every db's bookkeeping count (as the db's owner).
+    quick_check, not integrity_check: the full check reads every page and index —
+    seconds on a big db — and nothing changed when nothing applied."""
+    step = pipe.step("verify")
+    probes = {}
+    for r in runs:
+        if r.pending:
+            probes[f"{r.name} quick"] = f"{sqlite3_cmd(r.file)} 'PRAGMA quick_check;'"
+            # planner stats for the indexes/tables the migrations added; 0x10000 = every table, not just
+            # ones this connection queried (SQLite >= 3.46), with optimize's own cap on the work per table
+            probes[f"{r.name} optimize"] = f"{sqlite3_cmd(r.file)} 'PRAGMA optimize=0x10002;'"
+            # migrations run with foreign keys off (the CLI's default), so nothing stopped one from leaving
+            # rows that point nowhere; the migrations are committed by now, so this reports, it can't undo
+            probes[f"{r.name} fk"] = f"{sqlite3_cmd(r.file)} 'PRAGMA foreign_key_check;'"
+        probes[f"{r.name} count"] = (f"{sqlite3_cmd(r.file)} "
+                                     f"'SELECT COUNT(*) FROM {BOOKKEEPING_TABLE};'")
+    found = ssh.facts(conn, probes)
+    for r in runs:
+        if not r.pending:
+            continue
+        if found.get(f"{r.name} quick") != ["ok"]:
+            raise errors.EnvError(
+                f"{r.name}: the integrity check failed after its migrations",
+                why="\n".join(found.get(f"{r.name} quick", [])[:5]) or "sqlite3 reported nothing",
+                try_=f"look at the db on the box (`anci <env> info db {r.name}`)",
+            )
+        violations = found.get(f"{r.name} fk", [])
+        if violations:
+            tables = sorted({row.split("|")[0] for row in violations})
+            raise errors.EnvError(
+                f"{r.name}: foreign key violations in {', '.join(tables)}",
+                why=f"{len(violations)} row(s) reference a parent row that doesn't exist "
+                    f"(the migrations themselves were applied)",
+                try_="find them with `PRAGMA foreign_key_check;` and fix them in a new migration",
+            )
+    total = sum(int(found.get(f"{r.name} count", ["0"])[0] or 0) for r in runs)
+    step.done(f"{total} migrations on file")
+
+
+# ---------------------------------------------------------------------------
+# litestream
+
+
+# ---------------------------------------------------------------------------
+# regen
+
+
+def _restore_script(db_name: str, timestamp: str | None = None) -> str:
+    """Root script: restore `db_name` from its replica, in place.
+
+    litestream is stopped for the swap (and restarted on any exit); the restore
+    lands in `<db>.restore` first, so a failure leaves the live db untouched. The
+    old WAL/SHM go with the old db — SQLite would replay them onto the restored
+    file otherwise. Credentials come from the secrets file, exported (`set -a`)
+    so litestream's `${VAR}` expansion sees them.
+
+    `timestamp` (UTC RFC3339) restores the state as of that time instead of the
+    latest.
+    """
+    db_file = layout.db_path(db_name)
+    at = f"-timestamp {shlex.quote(timestamp)} " if timestamp else ""
+    return "\n".join([
+        "set -e",
+        f"set -a; [ -f {layout.SECRETS_FILE} ] && . {layout.SECRETS_FILE}; set +a",
+        f"systemctl stop {units.LITESTREAM_UNIT} 2>/dev/null || true",
+        f"trap 'systemctl start {units.LITESTREAM_UNIT} 2>/dev/null || true' EXIT",
+        f"rm -f {db_file}.restore",
+        f"{layout.LITESTREAM_BIN} restore -config {layout.LITESTREAM_FILE} "
+        f"{at}-o {db_file}.restore {db_file}",
+        f"rm -f {db_file}-wal {db_file}-shm",
+        f"mv -f {db_file}.restore {db_file}",
+        # litestream's local state belonged to the old file; it starts fresh from this one
+        f"rm -rf {layout.litestream_state_dir(db_name)}",
+        f"chown -R {ANCI_USER}:{ANCI_GROUP} {layout.db_dir(db_name)}",
+    ]) + "\n"
+
+
+def _parse_timestamp(value: str) -> str:
+    """A user-given --timestamp as UTC RFC3339 (`…Z`); it must carry a timezone."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        raise errors.ConfError(
+            f"--timestamp '{value}' isn't a timestamp with a timezone",
+            try_="use RFC3339, e.g. --timestamp 2026-10-14T15:00:00Z",
+        )
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _plan_script(db_name: str, timestamp: str | None = None) -> str:
+    """Root script: print the live db's size, then what a restore would fetch.
+
+    Read-only — `restore -dry-run` lists the replica files (and their compressed
+    sizes) without downloading or writing anything, so a bad key or a timestamp
+    older than the oldest backup fails here, before the apps are touched.
+    """
+    db_file = layout.db_path(db_name)
+    at = f"-timestamp {shlex.quote(timestamp)} " if timestamp else ""
+    return "\n".join([
+        "set -e",
+        f"set -a; [ -f {layout.SECRETS_FILE} ] && . {layout.SECRETS_FILE}; set +a",
+        f"echo live=$(( $(stat -c%s {db_file} 2>/dev/null || echo 0) "
+        f"+ $(stat -c%s {db_file}-wal 2>/dev/null || echo 0) ))",
+        f"{layout.LITESTREAM_BIN} restore -config {layout.LITESTREAM_FILE} "
+        f"{at}-dry-run -json -o {db_file}.restore {db_file}",
+    ]) + "\n"
+
+
+def _parse_plan(stdout: str) -> tuple[int, int, str | None] | None:
+    """(live bytes, replica bytes, newest file's timestamp) from `_plan_script`'s
+    output; None when it can't be read. Replica bytes are the *compressed* sizes of
+    the files a restore fetches — a lower bound on the restored db, not its size."""
+    live_line, _, rest = stdout.partition("\n")
+    if not live_line.startswith("live="):
+        return None
+    try:
+        live = int(live_line[len("live="):])
+        files = json.loads(rest)["files"]
+        total = sum(int(f["size"]) for f in files)
+    except (ValueError, KeyError, TypeError):
+        return None
+    stamps = [f["timestamp"] for f in files if isinstance(f.get("timestamp"), str)]
+    return live, total, max(stamps) if stamps else None
+
+
+def db_regen(conf: Conf, db_name: str | None, env_name: str, *, force: bool = False,
+             timestamp: str | None = None) -> None:
+    """Restore a db (None: every db the env replicates) from its litestream
+    replica — the latest, or as of `timestamp`. Destructive by definition."""
+    if db_name is None:
+        dbs_ = sorted(conf.replicated_dbs(env_name), key=lambda d: d.name)
+        if not dbs_:
+            raise errors.ConfError(
+                f"no db is replicated on env '{env_name}'",
+                try_=f"add a [db.<name>.replication] or [db.<name>.env.{env_name}.replication] "
+                     "table (bucket = '…')",
+            )
+    else:
+        db = conf.dbs.get(db_name)
+        if db is None:
+            raise errors.ConfError(f"db '{db_name}' isn't in anci.toml")
+        db = db.resolve_for(env_name)
+        if not db.replication:
+            raise errors.ConfError(
+                f"db '{db_name}' has no replication configured on env '{env_name}'",
+                try_=f"add a [db.{db_name}.replication] or [db.{db_name}.env.{env_name}.replication] "
+                     "table (bucket = '…')",
+            )
+        dbs_ = [db]
+    at = _parse_timestamp(timestamp) if timestamp else None
+    if not force and not sys.stdin.isatty():
+        raise errors.EnvError(
+            "regen replaces the live db — it needs a yes from a terminal",
+            why="an irreversible data decision can't be made non-interactively",
+            try_="run it interactively, or pass --force to confirm it in a script",
+        )
+
+    def restore_failed(db, e: ssh.SSHError, restored: list[str] = ()) -> errors.EnvError:
+        why = ("the live db is unchanged; nothing in the replica at or before "
+               f"{at}, or litestream couldn't read it" if at else
+               "the live db is unchanged; litestream couldn't read the replica")
+        if restored:
+            why += f"\nalready restored in this run: {', '.join(restored)}"
+        return errors.EnvError(
+            f"couldn't restore {db.name} from {litestream.replica_target(db)}",
+            why=why,
+            try_=(f"try a later time, or restore the latest: anci {env_name} regen {db.name}"
+                  if at else
+                  "check the replica's bucket/credentials (secrets file), then re-run"),
+            debug=e.stderr or str(e),
+        )
+
+    user = auth.authorize(conf, env_name)
+    conn = ssh.connect(conf, env_name, user)
+    pipe = ui.Pipeline()
+
+    # read-only look at each replica first: a bad key or timestamp fails here,
+    # before anything is stopped, and the prompt can say how much is coming back
+    plans = {}
+    for db in dbs_:
+        target = litestream.replica_target(db)
+        step = pipe.step("checking replica" if len(dbs_) == 1 else f"checking {db.name}'s replica")
+        try:
+            plans[db.name] = _parse_plan(ssh.sudo(conn, _plan_script(db.name, at), timeout=300).stdout)
+        except ssh.SSHError as e:
+            if e.unreachable or e.auth or e.host_key:
+                raise
+            step.fail()
+            raise restore_failed(db, e) from None
+        step.done(target)
+
+    def sizes(plan) -> str:
+        live, replica, newest = plan
+        newest_s = f", newest {newest}" if newest else ""
+        return (f"the replica holds at least {ui.human_size(replica)} "
+                f"(compressed{newest_s}); the live db is {ui.human_size(live)}")
+
+    if len(dbs_) == 1:
+        db, target = dbs_[0], litestream.replica_target(dbs_[0])
+        details = [f"{layout.db_path(db.name)} on {env_name} is replaced with"]
+        details.append(f"the replica ({target}) as of {at} — everything written after "
+                       f"that is lost for good" if at else f"the last replica ({target})")
+        if plans[db.name] is not None:
+            details.append(sizes(plans[db.name]))
+    else:
+        details = [f"every replicated db on {env_name} is replaced with its "
+                   + (f"replica as of {at} — everything written after that is lost for good"
+                      if at else "last replica")]
+        for db in dbs_:
+            line = f"{db.name} ← {litestream.replica_target(db)}"
+            if plans[db.name] is not None:
+                line += f": {sizes(plans[db.name])}"
+            details.append(line)
+    names = ", ".join(db.name for db in dbs_)
+    if not ui.confirm("regen REPLACES the live db:" if len(dbs_) == 1 else
+                      "regen REPLACES the live dbs:", details,
+                      f"regen {names}? continue?", force=force):
+        print(f"  {ui.dim('aborted — nothing changed')}")
+        return
+
+    # the box's lock from stop to start: a deploy/reconcile running alongside
+    # would restart the apps mid-restore. Taken after the prompt, so a pending
+    # yes/no never blocks other runs.
+    with boxlock.hold(conn, user, f"regen {db_name or 'all dbs'}"):
+        step = pipe.step("stopping apps")
+        # stop EVERY anci-owned app unit on the box — the conf's and any orphan the
+        # conf no longer declares. A ghost writer racing the restore corrupts it.
+        lifecycle.stop_app_units(conn)
+        step.done()
+        restored: list[str] = []
+        try:
+            for db in dbs_:
+                target = litestream.replica_target(db)
+                step = pipe.step("restoring from replica" if len(dbs_) == 1
+                                 else f"restoring {db.name}")
+                try:
+                    ssh.sudo(conn, _restore_script(db.name, at), timeout=1800)
+                except ssh.SSHError as e:
+                    if e.unreachable or e.auth or e.host_key:
+                        raise
+                    step.fail()
+                    raise restore_failed(db, e, restored) from None
+                step.done(target)
+                restored.append(db.name)
+        finally:
+            # re-arm the conf's timers + services even when the restore failed (never
+            # an orphan: a removed exe is dead, and a job's oneshot isn't run by hand)
+            step = pipe.step("restarting apps")
+            lifecycle.start_conf_units(conn, conf, env_name)
+            step.done()
+    pipe.done()
+
+
+# ---------------------------------------------------------------------------
+# dev-machine-side verbs
+
+
+def local_schema(conf: Conf, db_name: str, env_name: str) -> Path:
+    """Apply the full migration glob to a fresh scratch file ON THE DEV MACHINE.
+
+    Uses Python's stdlib sqlite3 — no guest, no CLI, no network. This is the
+    schema-only db.
+    """
+    db = conf.dbs.get(db_name)
+    if db is None:
+        raise errors.ConfError(f"db '{db_name}' isn't in anci.toml")
+    migrations = anchored_migrations(conf, db)
+    scratch = paths.project_root(conf) / ".artifact" / "db" / f"{db_name}.{env_name}.sql"
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.unlink(missing_ok=True)
+    conn = sqlite3.connect(scratch)
+    try:
+        conn.execute(
+            f"CREATE TABLE {BOOKKEEPING_TABLE} "
+            f"(name TEXT PRIMARY KEY, checksum TEXT NOT NULL, ts TEXT NOT NULL)"
+        )
+        for name, path in migrations:
+            sql = path.read_text()
+            # anci owns the transaction (migrations must not BEGIN/COMMIT). The lone `;` ends a
+            # last statement left without one, which the sqlite3 CLI (`migrate`) runs anyway
+            conn.executescript(
+                f"BEGIN;\n{sql}\n;\nINSERT INTO {BOOKKEEPING_TABLE} (name, checksum, ts) "
+                f"VALUES ({_q(name)}, {_q(_checksum(path))}, datetime('now'));\nCOMMIT;\n"
+            )
+    finally:
+        conn.close()
+    return scratch
+
+
+# sops' exit status when the editor closed without changing the file
+SOPS_UNCHANGED = 200
+
+
+def secrets_edit(conf: Conf, env_name: str) -> None:
+    """`anci <env> secrets` — sops wrapper.
+
+    Recipients are derived from the conf (every user with access to this env);
+    the file lives committed at envs/<env>/secrets.env, encrypted. sops itself
+    is vendored (bin.py) on first use — never a manual install.
+    """
+    if env_name not in conf.envs:
+        raise errors.ConfError(f"env '{env_name}' isn't in anci.toml")
+    if not sys.stdin.isatty():
+        raise errors.ConfError(
+            "editing secrets needs a terminal ($EDITOR)",
+            try_="run this in your terminal",
+        )
+    user = auth.authorize(conf, env_name)  # must have access to hold these secrets
+
+    sops = secrets_mod.sops_binary(  # vendored on first use — nothing to install
+        conf, env_name
+    )
+    encrypted = paths.secrets_encrypted(conf, env_name)
+    encrypted.parent.mkdir(parents=True, exist_ok=True)
+    recipients = secrets_mod.conf_recipients(conf, env_name)
+    env = secrets_mod.sops_env()
+
+    # an existing file keeps its old recipients under `sops edit --age …`, so apply
+    # key changes explicitly first
+    secrets_mod.sync_recipients(conf, env_name, sops=sops, env=env)
+    # one comma-separated --age: sops keeps only the last of repeated --age flags
+    # (comments dropped: a comma in one would split the list)
+    age = ",".join(" ".join(k.split()[:2]) for k in recipients)
+    p = subprocess.run([str(sops), "edit", "--age", age, str(encrypted)], env=env)
+    if p.returncode == SOPS_UNCHANGED:
+        print(f"  {ui.dim('no changes — nothing saved')}")
+        return
+    if p.returncode != 0:
+        raise errors.InternalError(
+            "sops exited with an error",
+            debug=f"exit {p.returncode}",
+        )
+    print(f"  {ui.green('✓')} secrets saved (encrypted to {len(recipients)} keys) → {encrypted}")
+    print(f"  {ui.dim(f'next: anci {env_name} reconcile  (sends the secrets to the env and restarts what uses them)')}")

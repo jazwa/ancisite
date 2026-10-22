@@ -1,0 +1,15 @@
+# rendered by anci — do not edit
+table ip @TABLE@ {}
+delete table ip @TABLE@
+table ip @TABLE@ {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        fib daddr type local tcp dport { 80, 443 } dnat to @VM_IP@
+        fib daddr type local udp dport 443 dnat to @VM_IP@
+    }
+    # hairpin: the host itself reaching its own public address
+    chain output {
+        type nat hook output priority -100; policy accept;
+        ip daddr != 127.0.0.0/8 fib daddr type local tcp dport { 80, 443 } dnat to @VM_IP@
+    }
+}
