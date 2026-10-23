@@ -1,8 +1,10 @@
 # ancisite
 
-## The Ancillary Website VM
+Ancisite is a simple and opinionated web platform centered around **files**. 
 
-"Good enough" website hosting, plug-and-play.
+Ancisite handles the **anci**llary (GET IT?!) stuff when it comes to operating a web**site** (WOW!)
+so you can get a _good enough_ website up and running _fast_.
+
 
 Ancisite turns a plain box into a running web app. Give it a server binary and an
 `anci.toml`; you get a box, reverse proxy, TLS, a SQLite database, and backups —
