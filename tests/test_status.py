@@ -16,9 +16,8 @@ from pathlib import Path
 from unittest import mock
 
 from anci import auth
-from anci import apply as apply_mod, layout, releases, ssh
+from anci import inspect, layout, releases, ssh
 from anci.commands import status
-from anci.converge import ConvergeContext, plan_env
 from anci.conf import (
     Conf,
     Db,
@@ -30,6 +29,8 @@ from anci.conf import (
     allocate_ports,
     load,
 )
+
+from .status_support import box_facts, observed
 
 CONF = """
 [user.jack]
@@ -109,8 +110,7 @@ class TestDbProbes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             probes = self._probes(load_in(td))
         script = "\n".join(probes.values())
-        for key in ("guests last", "guests size", "litestream dbs",
-                    "litestream version"):
+        for key in ("guests last", "guests size", "litestream dbs"):
             self.assertIn(key, probes)
         # last migration reads the guest's bookkeeping table as the service user
         self.assertIn("SELECT name FROM _anci_migrations", script)
@@ -126,32 +126,29 @@ class TestDbProbes(unittest.TestCase):
             conf = load_in(td)
             conf.dbs = {}
             probes = self._probes(conf)
-        self.assertNotIn("litestream version", probes)
         self.assertFalse(any(k.startswith("guests") for k in probes))
 
 
 class TestReadDbFacts(unittest.TestCase):
     def test_reads_db_facts(self):
         found = {
-            "litestream version": ["v0.5.17"],
             "guests last": ["0003_add_guests"],
             "guests size": ["12288"],
             "litestream dbs": [f"/var/lib/anci/db/guests/data.sql\t{REPLICA_TS}"],
         }
-        parsed = status._read(found, make_conf(), ["app"], "dev")
+        parsed = status._read(observed(found), make_conf(), ["app"], "dev")
         db = parsed.dbs["guests"]
         self.assertEqual(db.last, "0003_add_guests")
         self.assertEqual(db.size, 12288)
         self.assertTrue(db.exists)
         self.assertTrue(db.replicating)
         self.assertEqual(db.replica_ts, REPLICA_TS)
-        self.assertEqual(parsed.litestream_ver, "v0.5.17")
 
     def test_missing_db_and_empty_bookkeeping(self):
         conf = make_conf()
         conf.dbs["ghosts"] = Db(name="ghosts", migrations="./m")
         # guests: file exists, no bookkeeping rows, no birth, no replica row
-        parsed = status._read({"guests size": ["4096"]},
+        parsed = status._read(observed({"guests size": ["4096"]}),
                               conf, ["app"], "dev")
         self.assertIs(parsed.dbs["ghosts"].exists, False)
         self.assertIsNone(parsed.dbs["guests"].last)
@@ -199,7 +196,7 @@ class TestUrlColumn(unittest.TestCase):
         with mock.patch.object(auth, "identify_user", return_value="jack"), \
              mock.patch.object(ssh, "connect",
                                return_value=ssh.Conn(ip="127.0.0.1")), \
-             mock.patch.object(ssh, "facts", return_value=found), \
+             mock.patch.object(ssh, "facts", return_value=box_facts(found)), \
              contextlib.redirect_stdout(buf):
             status.status(conf, "dev")
         for line in buf.getvalue().splitlines():
@@ -223,7 +220,7 @@ class TestUrlColumn(unittest.TestCase):
         with mock.patch.object(auth, "identify_user", return_value="jack"), \
              mock.patch.object(ssh, "connect",
                                return_value=ssh.Conn(ip="203.0.113.10")), \
-             mock.patch.object(ssh, "facts", return_value={"app port": ["open"]}), \
+             mock.patch.object(ssh, "facts", return_value=box_facts({"app port": ["open"]})), \
              contextlib.redirect_stdout(buf):
             status.status(conf, "dev")
         self.assertNotIn("http", buf.getvalue())
@@ -253,11 +250,18 @@ class TestReplicationCell(unittest.TestCase):
     def test_notes_when_the_box_and_conf_differ(self):
         def notes(conf, replicating):
             st = status.DbState(size=1, replicating=replicating, replica_ts=REPLICA_TS)
-            report = status.Report({}, [], {}, {"guests": st}, None, litestream_up=True)
+            report = status.Report({}, [], {}, {"guests": st}, litestream_up=True)
             return status._replication_notes(conf, "dev", report)
         self.assertIn("still replicating", notes(make_conf(replication=None), True)[0])
         self.assertIn("isn't replicating yet", notes(make_conf(), False)[0])
         self.assertEqual(notes(make_conf(), True), [])
+
+    def test_destination_is_the_resolved_replica_target(self):
+        self.assertEqual(status._destination_cell(make_conf(), "dev", "guests"),
+                         "guests-backups/dev/guests")                   # <env>/<db> default
+        explicit = make_conf(replication=Replication(bucket="b", path="p"))
+        self.assertEqual(status._destination_cell(explicit, "dev", "guests"), "b/p")
+        self.assertEqual(status._destination_cell(make_conf(replication=None), "dev", "guests"), "—")
 
 
 class TestStatusDbTable(unittest.TestCase):
@@ -275,12 +279,12 @@ class TestStatusDbTable(unittest.TestCase):
              mock.patch.object(ssh, "connect",
                                return_value=ssh.Conn(ip="127.0.0.1")), \
              mock.patch.object(ssh, "facts") as facts_mock, \
-             mock.patch.object(status, "_plan_drift", return_value=[]), \
+             mock.patch.object(status, "_box_changes", return_value=[]), \
              contextlib.redirect_stdout(buf):
             if facts_raises is not None:
                 facts_mock.side_effect = facts_raises
             else:
-                facts_mock.return_value = found
+                facts_mock.return_value = box_facts(found)
             status.status(conf, "dev", debug=debug)
         return buf.getvalue()
 
@@ -297,8 +301,6 @@ class TestStatusDbTable(unittest.TestCase):
             "litestream active": ["active"],
             "litestream dbs": [f"/var/lib/anci/db/guests/data.sql\t{REPLICA_TS}"],
         }
-        if kw.get("dbver", "v0.5.17"):
-            found["litestream version"] = [kw.get("dbver", "v0.5.17")]
         return found
 
     def test_renders_the_db_table(self):
@@ -312,6 +314,8 @@ class TestStatusDbTable(unittest.TestCase):
         self.assertIn("0003_add_guests.sql", text)   # full filename
         self.assertIn("12.0 KB", text)
         self.assertIn("2s since last sync", text)             # plain text, no grading
+        self.assertIn("destination", text)
+        self.assertIn("guests-backups/dev/guests", text)
         self.assertIn("ssh with", text)              # login hint when the box is up
 
     def test_checklist_drops_the_litestream_line(self):
@@ -323,24 +327,6 @@ class TestStatusDbTable(unittest.TestCase):
         # a local env is reached through its localhost forward: no "not configured" note
         self.assertNotIn("not configured", text)
 
-    def test_debug_reports_version_drift(self):
-        conf = self._conf()
-        text = self._run(conf, self._guest_facts(dbver="v0.3.9"), debug=True)
-        self.assertIn("litestream: binary version drifted", text)
-        self.assertIn("v0.3.9", text)
-        self.assertIn("0.5.17", text)
-
-    def test_debug_clean_when_on_pin(self):
-        conf = self._conf()
-        text = self._run(conf, self._guest_facts(), debug=True)
-        self.assertNotIn("version drifted", text)
-        self.assertNotIn("binary MISSING", text)
-
-    def test_debug_reports_missing_binary(self):
-        conf = self._conf()
-        text = self._run(conf, self._guest_facts(dbver="missing"), debug=True)
-        self.assertIn("litestream: binary MISSING on the box", text)
-
     def test_box_down_grays_the_db_rows(self):
         conf = self._conf()
         text = self._run(
@@ -351,6 +337,7 @@ class TestStatusDbTable(unittest.TestCase):
         self.assertNotIn("behind", text)
         self.assertNotIn("litestream down", text)
         self.assertNotIn("ssh with", text)           # no login hint for a down box
+        self.assertIn("guests-backups/dev/guests", text)   # conf-derived, still shown
 
     def test_auth_failure_is_not_box_down(self):
         # a reachable box that refuses the login isn't "down" — it errors, and
@@ -371,41 +358,29 @@ class TestStatusDbTable(unittest.TestCase):
         self.assertIn("guests", buf.getvalue())
 
 
-class TestPlanDrift(unittest.TestCase):
-    """--debug drift is judged against the plan converge applies."""
+class TestBoxChanges(unittest.TestCase):
+    """--debug drift is what `anci <env> plan` shows."""
 
-    def _drift(self, edit=None):
+    def _changes(self, edit=None):
         with tempfile.TemporaryDirectory() as td:
             conf = load_in(td)
-            ctx = ConvergeContext(conf=conf, env_name="dev", ports=allocate_ports(conf),
-                                  exe_dirs=["app"], present_units=set())
-            plan = plan_env(ctx)
-            files = [f for ds in plan.desired_states for f in ds.files]
-            links = [l for ds in plan.desired_states for l in ds.links]
-            hashes = {f.path: apply_mod._sha(f.content) for f in files}
-            targets = {l.path: l.target for l in links}
+            observed = inspect.ObservedState(
+                {i: dict(f) for i, f in inspect.target_state(conf, "dev").items()})
             if edit:
-                edit(hashes, targets)
-            with mock.patch.object(status, "build_context", return_value=ctx), \
-                 mock.patch.object(apply_mod, "probe",
-                                   return_value=(hashes, targets, {})):
-                return status._plan_drift(conf, "dev", None)
+                edit(observed)
+            return status._box_changes(conf, "dev", observed)
 
     def test_clean_box_has_no_drift(self):
-        self.assertEqual(self._drift(), [])
+        self.assertEqual(self._changes(), [])
 
     def test_edited_and_missing_files_are_reported(self):
-        unit = "/etc/anci/units/app.service"
-        yaml = layout.LITESTREAM_FILE
+        def edit(observed):
+            observed["exe.app"]["unit"] = "0" * 64
+            del observed["litestream"]
 
-        def edit(hashes, targets):
-            hashes[unit] = "0" * 64
-            hashes[yaml] = None
-
-        drift = self._drift(edit)
-        self.assertIn(f"exes: {unit} drifted (edited on the box?)", drift)
-        self.assertIn(f"litestream: {yaml} MISSING on the box", drift)
-        self.assertEqual(len(drift), 2)
+        changes = self._changes(edit)
+        self.assertEqual(len(changes), 2)
+        self.assertEqual(changes, ["~ exe.app  unit", "+ litestream"])
 
 
 class TestResourceStats(unittest.TestCase):
@@ -438,7 +413,7 @@ class TestResourceStats(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(auth, "identify_user", return_value="jack"), \
              mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
-             mock.patch.object(ssh, "facts", return_value=found), \
+             mock.patch.object(ssh, "facts", return_value=box_facts(found)), \
              contextlib.redirect_stdout(buf):
             status.status(conf, "dev")
         out = buf.getvalue()
@@ -486,7 +461,7 @@ class TestBoxStats(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(auth, "identify_user", return_value="jack"), \
              mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
-             mock.patch.object(ssh, "facts", return_value=found), \
+             mock.patch.object(ssh, "facts", return_value=box_facts(found)), \
              contextlib.redirect_stdout(buf):
             status.status(conf, "dev")
         return buf.getvalue()

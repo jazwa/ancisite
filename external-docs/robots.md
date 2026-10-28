@@ -58,6 +58,15 @@ On your dev machine anci runs these through `sudo`, so `up`/`down` ask for your
 password. On a remote host, your login there (the conf user your ssh key matches)
 needs passwordless sudo.
 
+Also join the `libvirt` group on your dev machine, so commands that only look at
+your VMs (like `plan`) don't need your password:
+
+```bash
+sudo usermod -aG libvirt "$USER"    # then log out and back in
+```
+
+Without it those commands still work, but leave out what they'd read from the VM.
+
 **Someone else's box** needs only ssh access (see the Quickstart for what it must run).
 
 ## Quickstart
@@ -436,7 +445,8 @@ Global flags: `--debug` (raw commands/stderr, and the `status` drift report),
 | `anci <env> up` | bring the env's box up (idempotent): provision + boot its VM (`--recreate` rebuilds from scratch), resize it to the conf, and converge it (units, secrets, caddy, litestream; no new binaries), or set up an adopted box (`mode = 'adopt'`) on first contact (`--user <login>`, default `root`) |
 | `anci <env> down` | stop the env's VM (keeps its disk) |
 | `anci <env> status` | this env: versions, state, URLs, plus a db table (last migration, size, replication lag); `--debug` adds the drift report |
-| `anci <env> reconcile` | bring an existing env in line with `anci.toml` (users/keys, units, caddy, litestream, secrets, sshd, orphans) — ships no binaries and runs no migrations |
+| `anci <env> plan` | what on the box differs from `anci.toml`, one line per difference (`+` add, `~` change, `-` remove); changes nothing |
+| `anci <env> reconcile` | bring an existing env in line with `anci.toml` (users/keys, units, caddy, litestream, secrets, sshd; anything removed from `anci.toml` is removed from the box) — ships no binaries and runs no migrations |
 | `anci <env> deploy [<exe>]` | deploy a new version (idempotent); no exe = every exe, in one converge |
 | `anci <env> logs <exe> [-f]` | the exe's log file (`/var/log/anci/<exe>.log`; `-f` follows, journald fallback) |
 | `anci <env> migrate [<db>]` | apply pending migrations (also starts backups); no db = every db |

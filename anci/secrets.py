@@ -52,6 +52,12 @@ def resolve_secrets(conf: Conf, env_name: str) -> tuple[str | None, str]:
     return None, ""
 
 
+def has_secrets(conf: Conf, env_name: str) -> bool:
+    """Whether `resolve_secrets` finds a file for the env — without decrypting it."""
+    return (paths.secrets_encrypted(conf, env_name).is_file()
+            or paths.secrets_plaintext(conf, env_name).is_file())
+
+
 def sops_binary(conf, env_name: str) -> Path:
     """The vendored sops binary — fetched hash-pinned on first use.
 

@@ -391,13 +391,3 @@ class TestPrivateUploads(unittest.TestCase):
         private, public = (c.args[0][-1] for c in popen.call_args_list)
         self.assertTrue(private.startswith("umask 077; cat > "))
         self.assertTrue(public.startswith("cat > "))   # migrations stay readable by sqlite
-
-
-class TestGuestSha(unittest.TestCase):
-    def test_reads_as_root(self):
-        # the secrets file is root-only (0600): an unprivileged read always "misses"
-        from anci import apply as apply_mod
-        with mock.patch.object(ssh, "facts", return_value={"f /etc/anci/secrets.env": ["ab" * 32]}) as f:
-            self.assertEqual(apply_mod.guest_sha(ssh.Conn(ip="x"), "/etc/anci/secrets.env"), "ab" * 32)
-        self.assertIn("sha256sum", f.call_args.args[1]["f /etc/anci/secrets.env"])
-        self.assertTrue(f.call_args.kwargs["root"])     # the whole probe runs under one sudo

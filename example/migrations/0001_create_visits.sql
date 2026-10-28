@@ -1,0 +1,4 @@
+CREATE TABLE visits (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL
+);

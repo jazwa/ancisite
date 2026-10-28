@@ -1,0 +1,15 @@
+[user.zhao]
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOB1cxg6rpMRb2IeFzUq0CA32EOKDk0QHwNB0Ffx3k5P jazwang@proton.me'
+
+[env.dev]
+ip = '127.0.0.1'          # a VM on this machine
+access-users = ['zhao']
+vm = { anci-version = '0.0.1', vcpus = 2, mem = '2gb', disk = '22gb' }
+
+[exe.web]
+# a static (musl) build: runs on the box whatever its glibc
+source = './target/x86_64-unknown-linux-musl/release/web'
+
+
+[db.main]
+migrations = './migrations/'

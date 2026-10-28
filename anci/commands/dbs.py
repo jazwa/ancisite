@@ -9,7 +9,7 @@ Design points:
 - extensions ship to the content-addressed blob store and are symlinked into
   the db's ext *directory* before migrations run (one may be `.load`ed); the
   app is pointed at that directory, and an extension dropped from the conf is
-  pruned from it. Same model as converge (`anci/converge/dbs.py`)
+  pruned from it — by the same apply pass every verb ends in (`anci/inspect/`)
 - litestream is a pinned binary pushed like any artifact; one unit per env,
   one yaml listing all of that env's dbs; replicas are s3-compatible
   stores only (AWS S3, or anything else via its endpoint — R2, MinIO, …)
@@ -30,13 +30,12 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import apply as apply_mod
-from .. import auth, bin as bin_mod, boxlock, errors, paths, scratch, ssh, ui, units
-from .. import versions as versions_mod
-from ..converge import dbs as converge_dbs, lifecycle, run as converge_run, vendored
-from ..apply import LinkArtifact
-from ..converge.context import BlobUpload
-from ..render import litestream, shell
+from .. import auth, boxlock, errors, paths, scratch, ssh, ui, units
+from ..inspect import observed_state
+from ..inspect import exe as exe_mod
+from ..inspect.db import drop_litestream_state, extension_files, migration_setup
+from ..inspect.run import run_steps
+from ..render import litestream
 from ..layout import ANCI_GROUP, ANCI_USER
 from .. import secrets as secrets_mod
 from ..conf import conf_path
@@ -235,102 +234,40 @@ def migrate(conf: Conf, db_name: str | None, env_name: str, *, baseline: bool = 
             )
     if env_name not in conf.envs:
         raise errors.ConfError(f"env '{env_name}' isn't in anci.toml")
-    env = conf.envs[env_name]
     # local reads first: a missing migrations dir fails before the box is touched
     runs = []
     for name in names:
         migrations = anchored_migrations(conf, conf.dbs[name])
+        db = conf.dbs[name].resolve_for(env_name)
         runs.append(_DbRun(name=name, db=conf.dbs[name], file=layout.db_path(name),
                            migrations=migrations,
-                           checksums={n: _checksum(path) for n, path in migrations}))
+                           checksums={n: _checksum(path) for n, path in migrations},
+                           ext_paths=[f"{layout.ext_dir(name)}/{p.name}"
+                                      for p in extension_files(conf, db)]))
     user = auth.authorize(conf, env_name)
     conn = ssh.connect(conf, env_name, user)
     ssh.wait_ready(conn)   # a fresh box races cloud-init otherwise (auth / apt lock)
-    # held through the converge at the end too (the lock is re-entrant)
+    from ..inspect.run import converge
+
+    # held through both converges too (the lock is re-entrant)
     with boxlock.hold(conn, user, f"migrate {db_name or 'all dbs'}"):
         label = db_name or "migrations"
         print(f"\n  {ui.bold(label)} {ui.dim('→')} {ui.bold(env_name)} {ui.dim(f'({conn.ip})')}\n")
         pipe = ui.Pipeline()
-        _prepare(conn, env, runs, pipe)
-        _extensions(conf, conn, runs, pipe)
+        # first only what the migrations need on the box: these dbs' dirs and
+        # extensions (one may be `.load`ed), and sqlite3 — migrate can be a
+        # fresh box's first verb
+        converge(conf, env_name, select=migration_setup(names), pipe=pipe,
+                 label=f"setting up {', '.join(names)}")
         _check_history(conn, env_name, runs, pipe, baseline=baseline)
         _apply(conn, env_name, runs, pipe)
         _verify(conn, runs, pipe)
+        # then the rest of the env: units (apps restart onto the new schema),
+        # litestream (it starts once a db file exists), caddy, … No binaries:
+        # apps come up via deploy, not migrate.
+        converge(conf, env_name, pipe=pipe)
         pipe.done()
-        # converge the env's infra: litestream, units, secrets, caddy, orphans —
-        # the schemas are this verb's only unique work. No binaries: apps come
-        # up via deploy, not migrate.
-        from ..converge import converge
-
-        converge(conf, env_name)
     return 0
-
-
-def _prepare(conn: ssh.Conn, env, runs: list[_DbRun], pipe: ui.Pipeline) -> None:
-    """One root script: the shared `anci` account (every db's owner — migrate
-    runs before deploy by convention), the layout, each db's dirs, and dropped
-    extensions pruned. Says whether the box still needs sqlite3."""
-    lines = ["set -e", *shell.ANCI_ACCOUNT_CMDS, *shell.layout_commands()]
-    for r in runs:
-        lines.append(f"install -d -o {ANCI_USER} -g {ANCI_GROUP} -m 0750 {layout.ext_dir(r.name)}")
-        lines.append(f"install -d -o {ANCI_USER} -g {ANCI_USER} -m 0750 {layout.db_dir(r.name)}")
-        if not r.db.extensions:
-            lines.append(converge_dbs.prune_script(layout.ext_dir(r.name), []))
-    lines.append(f"[ -x {shlex.quote(layout.SQLITE_BIN)} ] || command -v sqlite3 >/dev/null "
-                 "|| echo need-sqlite3")
-    if "need-sqlite3" not in ssh.sudo(conn, "\n".join(lines)).stdout:
-        return
-    # `up`'s converge ships the vendored sqlite3, but migrate can be the first
-    # verb on a fresh box: push the same pinned binary, no package manager
-    step = pipe.step("installing sqlite3 on the box")
-    dl = vendored.sqlite_download(versions_mod.get(versions_mod.load(), env.anci_version))
-    if dl is None:
-        raise errors.ConfError(f"anci-version {env.anci_version} pins no sqlite3 binary")
-    local = bin_mod.vendor(dl.url, dl.sha512, dl.sha256, dl.name,
-                           paths.bin_cache_dir(), extract=dl.extract)
-    step.note(converge_run.upload_note(1, local.stat().st_size))
-    tmp = scratch.remote("sqlite3")
-    ssh.put(conn, str(local), tmp)
-    ssh.sudo(conn, f"install -m {dl.mode} {shlex.quote(tmp)} {shlex.quote(dl.dest)} "
-                   f"&& rm -f {shlex.quote(tmp)}")
-    step.done()
-
-
-def _extensions(conf: Conf, conn: ssh.Conn, runs: list[_DbRun], pipe: ui.Pipeline) -> None:
-    """Every db's extensions, to the blob store and symlinked into its ext dir —
-    before migrations, since one may `.load` them. Same model as converge/dbs.py."""
-    with_ext = [r for r in runs if r.db.extensions]
-    if not with_ext:
-        return
-    step = pipe.step("extensions")
-    blobs, links, prunes = [], [], []
-    for r in with_ext:
-        files = [conf_path(conf, e) for e in r.db.extensions]
-        absent = [e for e, f in zip(r.db.extensions, files) if not f.is_file()]
-        if absent:
-            raise errors.AppError(
-                f"{absent[0]} doesn't exist",
-                why=f"that's an extension listed under [db.{r.name}]",
-                try_="build/obtain it, or remove it from 'extensions'",
-            )
-        ext_dir = layout.ext_dir(r.name)
-        prunes.append(converge_dbs.prune_script(ext_dir, [f.name for f in files]))
-        for f in files:
-            sha = apply_mod.sha256_file(f)
-            blobs.append(BlobUpload(exe_name=r.name, local_path=f,
-                                    dest=layout.blob_path(sha), sha=sha))
-            links.append(LinkArtifact(path=f"{ext_dir}/{f.name}", target=layout.blob_path(sha)))
-            r.ext_paths.append(f"{ext_dir}/{f.name}")
-    ssh.sudo(conn, "\n".join(prunes))
-    _, targets, exists = apply_mod.probe(conn, [], [l.path for l in links],
-                                         deletes=[b.dest for b in blobs])
-    count, size = converge_run.pending_uploads(blobs, exists)
-    if count:
-        step.note(converge_run.upload_note(count, size))
-    up = sum(1 for b in blobs if converge_run.upload_blob(conn, b, None, exists))
-    result = apply_mod.apply(conn, [], links, probe_result=({}, targets, {}))
-    step.done(f"{up} uploaded, {ui.human_size(size)}" if up
-              else ("relinked" if result.changed_links else "unchanged"))
 
 
 def _read_history(conn: ssh.Conn, runs: list[_DbRun]) -> dict[str, tuple]:
@@ -457,7 +394,7 @@ def _apply(conn: ssh.Conn, env_name: str, runs: list[_DbRun], pipe: ui.Pipeline)
         return
     remote = scratch.remote("mig-bundle")
     bundle = _bundle(runs, remote)
-    step.note(converge_run.upload_note(1, len(bundle)))
+    step.note(f"{ui.human_size(len(bundle))} in 1 file")
     local = scratch.local("mig-bundle")
     local.write_bytes(bundle)
     try:
@@ -570,7 +507,7 @@ def _restore_script(db_name: str, timestamp: str | None = None) -> str:
         f"rm -f {db_file}-wal {db_file}-shm",
         f"mv -f {db_file}.restore {db_file}",
         # litestream's local state belonged to the old file; it starts fresh from this one
-        f"rm -rf {layout.litestream_state_dir(db_name)}",
+        drop_litestream_state(db_name),
         f"chown -R {ANCI_USER}:{ANCI_GROUP} {layout.db_dir(db_name)}",
     ]) + "\n"
 
@@ -725,9 +662,8 @@ def db_regen(conf: Conf, db_name: str | None, env_name: str, *, force: bool = Fa
     # yes/no never blocks other runs.
     with boxlock.hold(conn, user, f"regen {db_name or 'all dbs'}"):
         step = pipe.step("stopping apps")
-        # stop EVERY anci-owned app unit on the box — the conf's and any orphan the
-        # conf no longer declares. A ghost writer racing the restore corrupts it.
-        lifecycle.stop_app_units(conn)
+        on_box = observed_state(conn)
+        run_steps(conn, exe_mod.stop_steps(on_box))
         step.done()
         restored: list[str] = []
         try:
@@ -748,7 +684,7 @@ def db_regen(conf: Conf, db_name: str | None, env_name: str, *, force: bool = Fa
             # re-arm the conf's timers + services even when the restore failed (never
             # an orphan: a removed exe is dead, and a job's oneshot isn't run by hand)
             step = pipe.step("restarting apps")
-            lifecycle.start_conf_units(conn, conf, env_name)
+            run_steps(conn, exe_mod.start_steps(conf, env_name, on_box))
             step.done()
     pipe.done()
 

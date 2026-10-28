@@ -7,7 +7,6 @@ no port probe/restart), `app_url` refusing a job, `status` reporting a job, and
 """
 
 import contextlib
-import hashlib
 import io
 import shutil
 import subprocess
@@ -20,17 +19,17 @@ from anci.render import caddy
 from anci import auth
 from anci import box
 from anci.providers import adopt as adopt_mod
-from anci import apply as apply_mod
-from anci import secrets as secrets_mod
-from anci import errors, forward, releases, ssh
+from anci import errors, ssh
 from anci.commands import dbs, deploy, status
-from anci.converge import vendored
-from anci.converge.context import DesiredState
-from anci.apply import ApplyResult
+from anci.inspect import exe as exe_mod, vendored as vendored_mod
 from anci.conf import (
     Conf, Db, Env, Exe, ExeOverride, User, allocate_ports, load,
     Replication,
 )
+
+from .status_support import box_facts, observed
+
+from .inspect.fakebox import FakeBox
 
 
 # these tests drive whole verbs over a mocked transport; the box lock is a real
@@ -158,92 +157,45 @@ class TestAppUrlJob(unittest.TestCase):
 
 
 class TestDeployScheduled(unittest.TestCase):
-    def _run(self, td: str, *, apply_result: ApplyResult) -> dict:
+    """A job deployed onto a fake box: the real scripts run (tests/inspect/fakebox.py)."""
+
+    def _deploy(self, td: str, box: FakeBox, app: bytes) -> None:
         conf = load_conf(td, SCHEDULE_CONF)
-        # a minimal x86_64 ELF header (the deploy guard refuses scripts)
-        app = b"\x7fELF" + bytes([2, 1]) + b"\x00" * 12 + (62).to_bytes(2, "little")
         (Path(td) / "cleanup").write_bytes(app)
-        sha = hashlib.sha256(app).hexdigest()
-        captured: dict = {"files": {}, "links": [], "scripts": []}
-
-        def _apply(conn, files, links, probe_result=None, deletes=None):
-            for f in files:
-                captured["files"].setdefault(f.path, f.content)
-            if links:  # the main apply
-                captured["links"] = [l.path for l in links]
-            return apply_result
-
-        def _script(conn, script_text, *, timeout=120):
-            captured["scripts"].append(script_text)
-            if "sha256sum" in script_text:
-                return ssh.Result(f"{sha}  /tmp/x\n", "")
-            return ssh.Result("", "")
-
-        with mock.patch.object(vendored, "contribute",
-                               return_value=DesiredState(name="vendored")), \
-             mock.patch.object(auth, "identify_user", return_value="jack"), \
-             mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
-             mock.patch.object(ssh, "wait_ready"), \
-             mock.patch.object(secrets_mod, "resolve_secrets", return_value=(None, "")), \
-             mock.patch.object(forward, "reconcile", return_value={}), \
-             mock.patch.object(apply_mod, "probe", return_value=({}, {}, {})), \
-             mock.patch.object(apply_mod, "apply", side_effect=_apply), \
-             mock.patch.object(ssh, "sudo",
-                               side_effect=lambda c, t, **k: captured["scripts"].append(t) or ssh.Result("", "")), \
-             mock.patch.object(ssh, "script", side_effect=_script), \
-             mock.patch.object(ssh, "put"), \
-             mock.patch.object(releases, "append"), \
+        with box.connected(), mock.patch.object(vendored_mod, "binaries", return_value={}), \
              contextlib.redirect_stdout(io.StringIO()):
             deploy.deploy(conf, "cleanup-job", "dev")
-        return captured
+
+    # a minimal x86_64 ELF header (the deploy guard refuses scripts)
+    APP = b"\x7fELF" + bytes([2, 1]) + b"\x00" * 12 + (62).to_bytes(2, "little")
 
     def test_renders_oneshot_and_timer(self):
         with tempfile.TemporaryDirectory() as td:
-            captured = self._run(
-                td,
-                apply_result=ApplyResult(
-                    changed_files=[
-                        "/etc/anci/units/cleanup-job.service",
-                        "/etc/anci/units/cleanup-job.timer",
-                    ],
-                    changed_links=[
-                        "/etc/systemd/system/cleanup-job.service",
-                        "/etc/systemd/system/cleanup-job.timer",
-                    ],
-                ),
-            )
-        files = captured["files"]
-        unit = files["/etc/anci/units/cleanup-job.service"]
-        timer = files["/etc/anci/units/cleanup-job.timer"]
+            box = FakeBox(Path(td) / "box")
+            self._deploy(td, box, self.APP)
+            unit = box.path("/etc/anci/units/cleanup-job.service").read_text()
+            timer = box.path("/etc/anci/units/cleanup-job.timer").read_text()
+            self.assertTrue(box.path("/etc/systemd/system/cleanup-job.timer").is_symlink())
+            calls = box.calls()
         self.assertIn("Type=oneshot", unit)
         self.assertIn("ANCI_ENV=dev", unit)
-        self.assertNotIn("ANCI_PORT", unit)     # a job serves no HTTP
+        self.assertNotIn("ANCI_PORT=", unit)    # a job serves no HTTP
         self.assertNotIn("Restart=", unit)      # oneshot runs once
         self.assertIn("OnCalendar=daily", timer)
         self.assertIn("Persistent=true", timer)
         self.assertIn("WantedBy=timers.target", timer)
-        self.assertIn("/etc/systemd/system/cleanup-job.service", captured["links"])
-        self.assertIn("/etc/systemd/system/cleanup-job.timer", captured["links"])
-        scripts = "\n".join(captured["scripts"])
-        self.assertIn("systemctl enable --now cleanup-job.timer", scripts)
-        self.assertIn("systemctl is-active --quiet cleanup-job.timer", scripts)
-        self.assertNotIn("systemctl restart", scripts)   # never restart a oneshot
-        self.assertNotIn("/dev/tcp/", scripts)           # never probe a port
+        self.assertIn("enable --now cleanup-job.timer", calls)
+        self.assertIn("is-active --quiet cleanup-job.timer", calls)
+        self.assertFalse([c for c in calls if c.startswith("restart") and "cleanup" in c])
 
     def test_new_binary_only_does_not_touch_timer(self):
-        # the unit + timer are unchanged; a new blob must not re-enable the timer
         with tempfile.TemporaryDirectory() as td:
-            captured = self._run(
-                td,
-                apply_result=ApplyResult(
-                    changed_links=["/var/lib/anci/store/exes/cleanup-job/current"],
-                ),
-            )
-        scripts = "\n".join(captured["scripts"])
-        self.assertNotIn("systemctl enable --now", scripts)
-        self.assertNotIn("systemctl restart", scripts)
-        # ...but the timer is still verified armed
-        self.assertIn("systemctl is-active --quiet cleanup-job.timer", scripts)
+            box = FakeBox(Path(td) / "box")
+            self._deploy(td, box, self.APP)
+            box.clear_calls()
+            self._deploy(td, box, self.APP + b"v2")
+            calls = box.calls()
+        self.assertFalse([c for c in calls if "cleanup-job" in c])
 
 
 class TestStatusScheduled(unittest.TestCase):
@@ -253,7 +205,7 @@ class TestStatusScheduled(unittest.TestCase):
             found = {"cleanup-job current": ["/var/lib/anci/store/blobs/aaaa"],
                      "cleanup-job timer": ["active"],
                      "cleanup-job next": ["Mon 2026-10-05 03:00:00 UTC"]}
-            st = status._read(found, conf, ["cleanup-job"], "dev").state["cleanup-job"]
+            st = status._read(observed(found), conf, ["cleanup-job"], "dev").state["cleanup-job"]
         self.assertTrue(st.timer)
         self.assertEqual(st.current, "aaaa")
         self.assertEqual(st.next, "2026-10-05T03:00:00Z")
@@ -267,7 +219,7 @@ class TestStatusScheduled(unittest.TestCase):
             buf = io.StringIO()
             with mock.patch.object(auth, "identify_user", return_value="jack"), \
                  mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
-                 mock.patch.object(ssh, "facts", return_value=found), \
+                 mock.patch.object(ssh, "facts", return_value=box_facts(found)), \
                  contextlib.redirect_stdout(buf):
                 status.status(conf, "dev")
             text = buf.getvalue()
@@ -290,7 +242,7 @@ class TestStatusLastRun(unittest.TestCase):
             buf = io.StringIO()
             with mock.patch.object(auth, "identify_user", return_value="jack"), \
                  mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
-                 mock.patch.object(ssh, "facts", return_value=found), \
+                 mock.patch.object(ssh, "facts", return_value=box_facts(found)), \
                  contextlib.redirect_stdout(buf):
                 status.status(conf, "dev")
         row = next(line for line in buf.getvalue().splitlines() if "cleanup-job" in line)
@@ -380,47 +332,21 @@ class TestDbRegenTimers(unittest.TestCase):
         )
 
     def test_stops_and_rearms_timers_but_not_oneshot(self):
+        from anci.inspect import ObservedState
         with tempfile.TemporaryDirectory() as td:
             conf = self._conf(Path(td))
-            # the box also runs a unit the conf no longer declares (a removed exe)
-            inventory = (
-                "app.service\n"
-                "cleanup.service\n"
-                "cleanup.timer\n"
-                "ghost.service\n"
-            )
-            stops, starts = [], []
-
-            def _script(conn, s, **k):
-                if "/etc/anci/units" in s:   # the lifecycle facts probe
-                    return ssh.Result("".join(f"unit\t{u}\n" for u in inventory.split()), "")
-                return ssh.Result("", "")
-
-            def _sudo(conn, s, **k):
-                if s.startswith("systemctl stop"):
-                    stops.append(s)
-                elif s.startswith("systemctl start"):
-                    starts.append(s)
-                return ssh.Result("", "")
-
-            with mock.patch.object(dbs.auth, "authorize", return_value="jack"), \
-                 mock.patch.object(dbs.ssh, "connect", return_value=mock.Mock()), \
-                 mock.patch.object(dbs.ssh, "script", side_effect=_script), \
-                 mock.patch.object(dbs.ssh, "sudo", side_effect=_sudo), \
-                 contextlib.redirect_stdout(io.StringIO()):
-                dbs.db_regen(conf, "main-db", "dev", force=True)
-
-        # stop: EVERY anci-owned app unit on the box, the ghost included
-        stop = stops[0]
-        for u in ("app.service", "cleanup.service",
-                  "cleanup.timer", "ghost.service"):
+        # the box also runs an exe the conf no longer declares (a removed one)
+        on_box = ObservedState({f"exe.{n}": {} for n in ("app", "cleanup", "ghost")})
+        stop = "\n".join(s.script for s in exe_mod.stop_steps(on_box))
+        start = "\n".join(s.script for s in exe_mod.start_steps(conf, "dev", on_box))
+        # stop: EVERY exe on the box, the ghost included
+        for u in ("app.service", "cleanup.service", "cleanup.timer", "ghost.service"):
             self.assertIn(u, stop)
         # start: re-arm the conf's timer + service, never a ghost
-        start = starts[0]
-        self.assertIn("app.service", start)
-        self.assertIn("cleanup.timer", start)
+        self.assertIn("systemctl restart app.service", start)
+        self.assertIn("systemctl enable --now cleanup.timer", start)
         self.assertNotIn("cleanup.service", start)   # a oneshot isn't run by hand
-        self.assertNotIn("ghost.service", start)     # an orphan is dead
+        self.assertNotIn("ghost", start)             # an orphan is dead
 
 
 class TestJobsGetNoPort(unittest.TestCase):

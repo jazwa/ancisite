@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import errors, layout
-from .apply import sha256_file
+from .hashes import sha256_file
 
 
 @dataclass

@@ -77,7 +77,17 @@ esac
 for tool in ssh rsync; do
   command -v "$tool" >/dev/null 2>&1 || say "warning: '$tool' isn't installed; anci needs it"
 done
-command -v virsh >/dev/null 2>&1 \
-  || say "note: no libvirt here — only needed for mode = 'full' on this machine"
+if command -v virsh >/dev/null 2>&1; then
+  # joining needs sudo and a new login, so it's a hint, like the PATH one
+  if getent group libvirt >/dev/null 2>&1; then
+    case " $(id -nG) " in
+      *" libvirt "*) ;;
+      *) say "join the libvirt group, so anci can read your VMs without a password:"
+         say "  sudo usermod -aG libvirt \"\$USER\"   (then log out and back in)" ;;
+    esac
+  fi
+else
+  say "note: no libvirt here — only needed for mode = 'full' on this machine"
+fi
 
 say "$("$BIN_DIR/anci" --version) — next: anci init"

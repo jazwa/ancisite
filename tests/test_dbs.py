@@ -210,7 +210,7 @@ class TestMigrateVerify(unittest.TestCase):
              mock.patch.object(dbs.ssh, "script", side_effect=_run), \
              mock.patch.object(dbs.ssh, "put"), \
              mock.patch.object(dbs, "anchored_migrations", return_value=migrations), \
-             mock.patch("anci.converge.converge"), \
+             mock.patch("anci.inspect.run.converge"), \
              contextlib.redirect_stdout(io.StringIO()):
             dbs.migrate(conf, "main-db", "dev")
         return " ".join(cmds)
@@ -247,39 +247,40 @@ class TestMigrateCreatesOwner(unittest.TestCase):
             dbs={"main-db": Db(name="main-db", migrations=str(mig))},
         )
 
-    def test_creates_owner_before_using_it(self):
+    def test_sets_up_its_dbs_before_migrating_then_converges(self):
         with tempfile.TemporaryDirectory() as td:
             conf = self._conf(Path(td))
-            cmds: list[str] = []
-
-            def _sudo(conn, s, **k):
-                cmds.append(s)
-                return ssh.Result("", "")
+            order: list = []
 
             def _script(conn, s, **k):
-                cmds.append(s)
+                if s.startswith("bash "):
+                    order.append("migrations")
                 return ssh.Result("main-db quick\tok\n" if "quick_check" in s else "", "")
 
             with mock.patch.object(dbs.auth, "authorize", return_value="jack"), \
                  mock.patch.object(dbs.ssh, "connect", return_value=mock.Mock()), \
                  mock.patch.object(dbs.ssh, "wait_ready"), \
-                 mock.patch.object(dbs.ssh, "test", return_value=True), \
-                 mock.patch.object(dbs.ssh, "sudo", side_effect=_sudo), \
+                 mock.patch.object(dbs.ssh, "sudo", return_value=ssh.Result("", "")), \
                  mock.patch.object(dbs.ssh, "script", side_effect=_script), \
                  mock.patch.object(dbs.ssh, "put"), \
-                 mock.patch("anci.converge.converge"), \
+                 mock.patch("anci.inspect.run.converge",
+                            side_effect=lambda *a, **k: order.append(k.get("select"))), \
                  contextlib.redirect_stdout(io.StringIO()):
                 dbs.migrate(conf, "main-db", "dev")
+        setup, migrations, rest = order
+        self.assertIsNotNone(setup)          # narrowed to what the migrations need
+        self.assertEqual(migrations, "migrations")
+        self.assertIsNone(rest)              # then the whole env
 
-        prep = next((c for c in cmds if "useradd --system --no-create-home" in c), None)
-        self.assertIsNotNone(prep, f"no service-user ensure; commands: {cmds}")
-        for part in ("getent group anci", "install -d -o root -g anci -m 2775",
-                     "install -d -o anci -g anci -m 0750"):
-            self.assertIn(part, prep)
-        # the group + owner exist before anything requires them
-        self.assertLess(prep.index("getent group anci"), prep.index("install -d -o root -g anci -m 2775"))
-        self.assertLess(prep.index("useradd --system"), prep.index("install -d -o anci -g anci -m 0750"))
-
+    def test_setup_keeps_its_dbs_and_sqlite3(self):
+        from anci.inspect import Action, Change
+        from anci.inspect.db import migration_setup
+        changes = [Change("db.main-db", Action.CREATE, {"exts": (None, {})}),
+                   Change("db.other", Action.CREATE, {"exts": (None, {})}),
+                   Change("exe.app", Action.UPDATE, {"unit": ("a", "b")}),
+                   Change("vendored", Action.UPDATE, {"caddy": ("a", "b"), "sqlite3": (None, "c")})]
+        self.assertEqual(migration_setup(["main-db"])(changes),
+                         [changes[0], Change("vendored", Action.UPDATE, {"sqlite3": (None, "c")})])
 
 
 class TestUserTablesSql(unittest.TestCase):
@@ -336,7 +337,7 @@ class TestMigrateChecksums(unittest.TestCase):
              mock.patch.object(dbs, "_upgrade_bookkeeping", upgrade), \
              mock.patch.object(dbs, "_set_checksums", setc), \
              mock.patch.object(dbs, "_delete_bookkeeping", delc), \
-             mock.patch("anci.converge.converge"), \
+             mock.patch("anci.inspect.run.converge"), \
              contextlib.redirect_stdout(io.StringIO()):
             dbs.migrate(conf, "main-db", "dev", baseline=baseline)
         return upgrade, setc, delc
@@ -402,7 +403,7 @@ if __name__ == "__main__":
 
 
 class TestMigrateAll(unittest.TestCase):
-    """`migrate` with no db: every db in name order, then one converge."""
+    """`migrate` with no db: every db in name order, in one bundle."""
 
     def _run(self, conf):
         order, scripts = [], []
@@ -421,20 +422,20 @@ class TestMigrateAll(unittest.TestCase):
              mock.patch.object(dbs.ssh, "sudo", return_value=ssh.Result("", "")), \
              mock.patch.object(dbs.ssh, "put", side_effect=_put), \
              mock.patch.object(dbs.ssh, "script", side_effect=_script), \
-             mock.patch("anci.converge.converge",
+             mock.patch("anci.inspect.run.converge",
                         side_effect=lambda *a, **k: order.append("converge")), \
              contextlib.redirect_stdout(io.StringIO()):
             dbs.migrate(conf, None, "dev")
         return order, scripts
 
-    def test_every_db_in_one_bundle_then_one_converge(self):
+    def test_every_db_in_one_bundle(self):
         with tempfile.TemporaryDirectory() as td:
             conf = TestMigrateCreatesOwner._conf(None, Path(td))
             conf.dbs["aux"] = Db(name="aux", migrations=str(Path(td) / "migrations"))
             order, scripts = self._run(conf)
-        self.assertEqual(len(order), 2)                 # one upload, then the converge
-        bundle, converge = order
-        self.assertEqual(converge, "converge")
+        self.assertEqual(len(order), 3)          # the dbs set up, one upload, then the converge
+        setup, bundle, converge = order
+        self.assertEqual((setup, converge), ("converge", "converge"))
         self.assertLess(bundle.index("db/aux/data.sql < "), bundle.index("db/main-db/data.sql < "))
         # history and verification are one round trip each, for both dbs
         self.assertEqual(len([s for s in scripts if "pragma_table_info" in s]), 1)
@@ -473,10 +474,10 @@ class TestMigrateFailure(unittest.TestCase):
              mock.patch.object(dbs.ssh, "sudo", return_value=ssh.Result("", "")), \
              mock.patch.object(dbs.ssh, "put"), \
              mock.patch.object(dbs.ssh, "script", side_effect=_script), \
-             mock.patch.object(dbs.apply_mod, "guest_sha", return_value=None), \
              mock.patch.object(dbs, "anchored_migrations", return_value=files), \
              mock.patch.object(dbs, "_applied_checksums", return_value=applied_after), \
              mock.patch.object(dbs, "scratch") as scratch, \
+             mock.patch("anci.inspect.run.converge"), \
              contextlib.redirect_stdout(io.StringIO()):
             scratch.local.return_value = Path(td) / "script"
             scratch.remote.return_value = "/tmp/script"
@@ -520,10 +521,9 @@ class TestMigrateVerify(unittest.TestCase):
              mock.patch.object(dbs.ssh, "sudo", return_value=ssh.Result("", "")), \
              mock.patch.object(dbs.ssh, "put"), \
              mock.patch.object(dbs.ssh, "script", side_effect=_script), \
-             mock.patch.object(dbs.apply_mod, "guest_sha", return_value=None), \
              mock.patch.object(dbs, "anchored_migrations", return_value=[("0001_a", p)]), \
              mock.patch.object(dbs, "scratch") as scratch, \
-             mock.patch("anci.converge.converge") as converge, \
+             mock.patch("anci.inspect.run.converge") as converge, \
              contextlib.redirect_stdout(io.StringIO()):
             scratch.local.return_value = Path(td) / "script"
             scratch.remote.return_value = "/tmp/script"
@@ -542,14 +542,14 @@ class TestMigrateVerify(unittest.TestCase):
         self.assertLess(check.index("quick_check"), check.index("optimize"))
         self.assertLess(check.index("optimize"), check.index("foreign_key_check"))
         self.assertGreaterEqual(check.count(f".timeout {dbs.SQLITE_TIMEOUT_MS}"), 3)
-        converge.assert_called_once()
+        self.assertEqual(converge.call_count, 2)    # the dbs set up, then the env
 
     def test_foreign_key_violations_name_the_tables(self):
         with tempfile.TemporaryDirectory() as td:
             err, _seen, converge = self._migrate(td, "review|7|entity|0\nreview|9|entity|0\ntag|3|review|0\n")
         self.assertIn("foreign key violations in review, tag", str(err))
         self.assertIn("3 row(s)", err.why)
-        converge.assert_not_called()
+        converge.assert_called_once()               # only the setup: the env isn't converged
 
 
 @unittest.skipUnless(shutil.which("sqlite3"), "needs the sqlite3 CLI")
@@ -767,8 +767,9 @@ class TestRegenTimestamp(unittest.TestCase):
         with mock.patch.object(dbs.auth, "authorize", return_value="jack"), \
              mock.patch.object(dbs.ssh, "connect", return_value=mock.Mock()), \
              mock.patch.object(dbs.ssh, "sudo", sudo), \
-             mock.patch.object(dbs.lifecycle, "stop_app_units") as stop, \
-             mock.patch.object(dbs.lifecycle, "start_conf_units"), \
+             mock.patch.object(dbs, "observed_state"), \
+             mock.patch.object(dbs.exe_mod, "stop_steps", return_value=[]) as stop, \
+             mock.patch.object(dbs.exe_mod, "start_steps", return_value=[]), \
              mock.patch.object(dbs.sys.stdin, "isatty", return_value=True), \
              mock.patch("builtins.input", return_value=answer or "y") as ask, \
              contextlib.redirect_stdout(out):
@@ -941,43 +942,31 @@ class TestSecretsEditSyncsRecipients(unittest.TestCase):
 
 
 class TestMigrateExtensions(unittest.TestCase):
-    """migrate ships extensions as blobs symlinked into the ext dir, pruning stale ones."""
+    """migrate loads a db's extensions from its ext dir (apply ships them there first)."""
 
-    class _Stop(Exception):
-        pass
-
-    def test_extension_becomes_a_blob_and_symlink(self):
+    def test_migrations_load_them_from_the_ext_dir(self):
         from anci import layout
-        from anci.apply import sha256_file
         with tempfile.TemporaryDirectory() as td:
             conf = make_conf(Path(td))
-            ext = Path(td) / "ext.so"
-            ext.write_bytes(b"\x7fELF-ext")
-            sha = sha256_file(ext)
-            sudos, applied_links, uploaded = [], [], []
-
-            def _upload_blob(conn, blob, have_size, exists=None):
-                uploaded.append(blob)
-                return True
-
-            def _apply(conn, files, links, probe_result=None, deletes=None):
-                applied_links.extend(links)
-                raise self._Stop()     # stop migrate right after the extension step
-
+            (Path(td) / "ext.so").write_bytes(b"\x7fELF-ext")
+            bundles = []
             with mock.patch.object(dbs.auth, "authorize", return_value="jack"), \
                  mock.patch.object(dbs.ssh, "connect", return_value=ssh.Conn(ip="x")), \
                  mock.patch.object(dbs.ssh, "wait_ready"), \
-                 mock.patch.object(dbs.ssh, "sudo",
-                                   side_effect=lambda c, s, **k: sudos.append(s) or ssh.Result("", "")), \
-                 mock.patch.object(dbs.ssh, "put"), \
-                 mock.patch.object(dbs.ssh, "script", return_value=ssh.Result("", "")), \
-                 mock.patch.object(dbs.apply_mod, "probe", return_value=({}, {}, {})), \
-                 mock.patch.object(dbs.converge_run, "upload_blob", side_effect=_upload_blob), \
-                 mock.patch.object(dbs.apply_mod, "apply", side_effect=_apply), \
+                 mock.patch.object(dbs.ssh, "sudo", return_value=ssh.Result("", "")), \
+                 mock.patch.object(dbs.ssh, "put",
+                                   side_effect=lambda c, local, r, **k: bundles.append(Path(local).read_text())), \
+                 mock.patch.object(dbs.ssh, "script",
+                                   return_value=ssh.Result("main-db quick\tok\n", "")), \
+                 mock.patch("anci.inspect.run.converge"), \
                  contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises(self._Stop):
-                    dbs.migrate(conf, "main-db", "dev")
-        self.assertEqual([b.dest for b in uploaded], [layout.blob_path(sha)])   # one blob, by hash
-        link = next(l for l in applied_links if l.path == f"{layout.ext_dir('main-db')}/ext.so")
-        self.assertEqual(link.target, layout.blob_path(sha))                    # symlinked into ext dir
-        self.assertTrue(any("! -name ext.so" in s for s in sudos))              # pruned to the listed set
+                dbs.migrate(conf, "main-db", "dev")
+        self.assertIn(f".load {layout.ext_dir('main-db')}/ext.so", bundles[0])
+
+    def test_a_missing_extension_fails_before_the_box_is_touched(self):
+        with tempfile.TemporaryDirectory() as td:
+            conf = make_conf(Path(td))
+            with mock.patch.object(dbs.ssh, "connect") as connect, \
+                 self.assertRaises(errors.AppError):
+                dbs.migrate(conf, "main-db", "dev")
+        connect.assert_not_called()

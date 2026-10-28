@@ -23,6 +23,9 @@ class Hypervisor:
     """This dev machine (`login` None) or a remote host (`login` = "user@host")."""
 
     login: str | None = None
+    # this dev machine only: False runs commands as you, not through sudo — for
+    # reads a `libvirt` group member may make without a password
+    sudo: bool = True
 
     @property
     def where(self) -> str:
@@ -30,7 +33,7 @@ class Hypervisor:
 
     def _argv(self, script: str) -> list[str]:
         if self.login is None:
-            return ["sudo", "-n", "bash", "-c", script]
+            return ["sudo", "-n", "bash", "-c", script] if self.sudo else ["bash", "-c", script]
         user, host = self.login.split("@", 1)
         # one shared ssh connection for the many commands an `up` runs
         return ["ssh", *ssh._mux_opts(user, host, SSH_PORT), "-o", "BatchMode=yes",
@@ -107,3 +110,14 @@ def hypervisor(conf: Conf, env_name: str) -> Hypervisor:
         raise errors.EnvError("anci needs sudo to run the VM on your dev machine",
                               try_="re-run and enter your password")
     return Hypervisor()
+
+
+def libvirt_hypervisor(conf: Conf, env_name: str) -> Hypervisor:
+    """`hypervisor`, for work that only calls virsh (reading or resizing a
+    running VM). On this dev machine a `libvirt` group member may do that as
+    themselves, so sudo is asked for only when libvirt refuses you."""
+    if not is_remote_host(conf.envs[env_name]):
+        mine = Hypervisor(sudo=False)
+        if mine.virsh("uri", check=False).returncode == 0:
+            return mine
+    return hypervisor(conf, env_name)

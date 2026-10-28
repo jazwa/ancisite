@@ -2,7 +2,7 @@
 
 Deploy is a thin entry point: resolve the bytes (a local `source` and `static`
 dir), check the arch, then hand them to the single converge pass. The pipeline
-itself lives in `converge`.
+itself lives in `anci/inspect/run.py`.
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ import subprocess
 
 from .. import auth, errors, layout, ssh, staticfiles, units
 from ..conf import Conf, conf_path
-from ..converge import converge
+from ..inspect.exe import deploy_inputs
+from ..inspect.run import converge
 
 
 
@@ -147,17 +148,31 @@ def deploy(conf: Conf, exe_name: str | None, env_name: str) -> str:
         raise errors.ConfError(f"env '{env_name}' isn't in anci.toml")
     auth.authorize(conf, env_name)
 
+    # only these exes get new bytes; any other exe keeps what's deployed
+    return converge(conf, env_name, inputs=local_builds(conf, env_name, names))
+
+
+def local_builds(conf: Conf, env_name: str, names: list[str], *,
+                 skip_unbuilt: bool = False) -> dict:
+    """What `deploy` ships for `names`: each exe's local binary (checked it can
+    run on the box) and static files, as a converge's inputs. `plan` reads the
+    same, with `skip_unbuilt`: an exe with no build yet is left out, not an error."""
     binaries, statics, source = {}, {}, {}
     for name in names:
         resolved = conf.exes[name].resolve_for(env_name)
-        blob = _local_source(conf, name, env_name)
+        try:
+            blob = _local_source(conf, name, env_name)
+            scanned = _local_static(conf, name, env_name) if resolved.static else None
+        except errors.AppError:
+            if skip_unbuilt:
+                continue
+            raise
         check_app_arch(blob)
         binaries[name] = blob
-        if resolved.static:
-            statics[name] = _local_static(conf, name, env_name)
+        if scanned:
+            statics[name] = scanned
         source[name] = resolved.source
-    # only these exes get new bytes; any other exe keeps what's deployed
-    return converge(conf, env_name, binaries=binaries, statics=statics, source=source)
+    return deploy_inputs(binaries, statics, source)
 
 
 def log_script(log_file: str, *, follow: bool, lines: int = 50) -> str:

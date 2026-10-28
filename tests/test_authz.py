@@ -5,7 +5,6 @@ whole `anci.ssh` surface is mocked (partial mocks fall through to
 real ssh and hang the suite).
 """
 
-import hashlib
 import os
 import tempfile
 import unittest
@@ -13,7 +12,6 @@ from pathlib import Path
 from unittest import mock
 
 from anci import box
-from anci import apply as ap
 from anci import auth, errors, paths, releases, ssh, ui
 from anci.commands import dbs, status
 from anci.conf import (
@@ -27,6 +25,8 @@ from anci.conf import (
     allocate_ports,
     load,
 )
+
+from .status_support import box_facts, observed
 
 CONF = """
 [user.jack]
@@ -223,18 +223,6 @@ class TestEnvTrust(unittest.TestCase):
             self.assertFalse(ssh.pin_path(conf, "staging").exists())
 
 
-class TestSecretsDiff(unittest.TestCase):
-    def test_secret_artifact_is_hash_and_mode_aware(self):
-        f = ap.FileArtifact(
-            path="/etc/anci/secrets/dev.env", content="MY_SECRET=shh\n", mode="0600"
-        )
-        h = hashlib.sha256(b"MY_SECRET=shh\n").hexdigest()
-        self.assertEqual(f.mode, "0600")
-        self.assertEqual(ap.diff_files([f], {f.path: h}), [])       # unchanged
-        self.assertEqual(ap.diff_files([f], {f.path: None}), [f])   # missing
-        self.assertEqual(ap.diff_files([f], {f.path: "stale"}), [f])  # rotated
-
-
 class TestPathAnchoring(unittest.TestCase):
     def test_artifacts_anchor_on_the_conf_dir_not_cwd(self):
         with tempfile.TemporaryDirectory() as td:
@@ -308,24 +296,24 @@ class TestMechUnits(unittest.TestCase):
             "litestream.service installed": ["yes"],
             "caddy.service active": ["inactive"],
         }
-        parsed = status._read(found, self._conf(), ["app"], "dev")
+        parsed = status._read(observed(found), self._conf(), ["app"], "dev")
         lit = parsed.mech["litestream.service"]
-        self.assertEqual((lit.active, lit.enabled, lit.installed), ("active", "enabled", True))
+        self.assertEqual((lit.active, lit.enabled, lit.installed), ("active", True, True))
         cad = parsed.mech["caddy.service"]
         self.assertEqual(cad.active, "inactive")
         self.assertFalse(cad.installed)
 
     def test_mech_check_states(self):
         unit = "caddy.service"
-        running = status._mech_check(unit, status.MechState(active="active", enabled="enabled", installed=True))
+        running = status._mech_check(unit, status.MechState(active="active", enabled=True, installed=True))
         self.assertIn("✓", running)
         self.assertIn(f"{unit} — running", running)
         self.assertNotIn("not enabled", running)
-        stopped = status._mech_check(unit, status.MechState(active="inactive", enabled="disabled", installed=True))
+        stopped = status._mech_check(unit, status.MechState(active="inactive", enabled=False, installed=True))
         self.assertIn("✗", stopped)
         self.assertIn(f"{unit} — stopped", stopped)
         self.assertIn("· not enabled at boot", stopped)
-        missing = status._mech_check("litestream.service", status.MechState(active="inactive", enabled="", installed=False))
+        missing = status._mech_check("litestream.service", status.MechState(active="inactive", enabled=False, installed=False))
         self.assertIn(f"litestream.service — not installed", missing)
         self.assertNotIn("not enabled", missing)   # no unit file → boot is moot
         gap = status._mech_check(unit, None)
@@ -339,7 +327,7 @@ class TestMechUnits(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(auth, "identify_user", return_value="jack"), \
              mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
-             mock.patch.object(ssh, "facts", return_value=found), \
+             mock.patch.object(ssh, "facts", return_value=box_facts(found)), \
              contextlib.redirect_stdout(buf):
             status.status(conf, "dev", debug=debug)
         return buf.getvalue()
@@ -420,7 +408,7 @@ class TestStatusReleases(unittest.TestCase):
                                        anci_version="0.0.1")},
             exes={n: Exe(name=n, source="./s") for n in ("app", "worker")},
         )
-        parsed = status._read(found, conf, ["app", "worker"], "dev")
+        parsed = status._read(observed(found), conf, ["app", "worker"], "dev")
         self.assertEqual(status._latest_release(parsed.releases, "app", "dev")["user"], "jack")
         self.assertEqual(
             status._latest_release(parsed.releases, "worker", "dev")["user"], "alice"
@@ -462,47 +450,6 @@ class TestAllocatePortsBoundary(unittest.TestCase):
     def test_eleven_exes_are_rejected(self):
         with self.assertRaises(errors.ConfError):
             allocate_ports(self._conf(11))
-
-
-class TestApplyUploadVerify(unittest.TestCase):
-    def test_corrupt_upload_is_rejected_and_local_temp_cleaned(self):
-        conn = ssh.Conn(ip="1.2.3.4")
-        f = ap.FileArtifact(path="/etc/x", content="hello", mode="0644")
-        captured = {}
-
-        def fake_put(c, local, remote, *, timeout=600, **kw):
-            captured["local"] = local
-
-        def fake_script(c, script_text, *, timeout=120):
-            if "sha256sum" in script_text:
-                return ssh.Result(stdout="deadbeef  /tmp/x\n", stderr="")
-            return ssh.Result(stdout="", stderr="")
-
-        with mock.patch.object(ap.ssh, "put", side_effect=fake_put), mock.patch.object(
-            ap.ssh, "script", side_effect=fake_script
-        ):
-            with self.assertRaises(errors.EnvError):
-                ap.apply(conn, [f], [], probe_result=({f.path: None}, {}, {}))
-        self.assertFalse(Path(captured["local"]).exists())
-
-    def test_good_upload_installs(self):
-        conn = ssh.Conn(ip="1.2.3.4")
-        f = ap.FileArtifact(path="/etc/x", content="hello", mode="0644")
-        want = hashlib.sha256(b"hello").hexdigest()
-        scripts = []
-
-        def fake_script(c, script_text, *, timeout=120):
-            scripts.append(script_text)
-            if "sha256sum" in script_text:
-                return ssh.Result(stdout=f"{want}  /tmp/x\n", stderr="")
-            return ssh.Result(stdout="", stderr="")
-
-        with mock.patch.object(ap.ssh, "put", return_value=None), mock.patch.object(
-            ap.ssh, "script", side_effect=fake_script
-        ):
-            result = ap.apply(conn, [f], [], probe_result=({f.path: None}, {}, {}))
-        self.assertEqual(result.changed_files, ["/etc/x"])
-        self.assertTrue(any("install" in s for s in scripts))
 
 
 if __name__ == "__main__":

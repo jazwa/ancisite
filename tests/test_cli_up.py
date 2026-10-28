@@ -40,15 +40,17 @@ class TestUpDispatch(unittest.TestCase):
     def run_env(self, env, *argv):
         with mock.patch("anci.providers.adopt.up_adopt") as ext, \
              mock.patch("anci.providers.libvirt.env_up") as vm, \
-             mock.patch("anci.converge.converge") as infra:
+             mock.patch("anci.inspect.run.converge") as infra:
             cli._run_env(self.conf, env, list(argv), debug=False)
         return ext, vm, infra
 
     def test_adopt_up_bootstraps_then_converges(self):
         ext, vm, infra = self.run_env("prod", "up", "--user", "ubuntu")
-        ext.assert_called_once_with(self.conf, "prod", login_user="ubuntu")
+        ext.assert_called_once_with(self.conf, "prod", login_user="ubuntu", pipe=mock.ANY)
         vm.assert_not_called()
-        infra.assert_called_once_with(self.conf, "prod", grow_disk=True)
+        infra.assert_called_once_with(self.conf, "prod", grow_disk=True, pipe=mock.ANY)
+        # one report: the bootstrap and the converge share a pipeline
+        self.assertIs(ext.call_args.kwargs["pipe"], infra.call_args.kwargs["pipe"])
 
     def test_adopt_up_without_user_passes_none(self):
         # up_adopt picks root on first contact, and skips the bootstrap on a set-up box
@@ -64,7 +66,7 @@ class TestUpDispatch(unittest.TestCase):
     def test_declined_bootstrap_never_converges(self):
         with mock.patch("anci.providers.adopt.up_adopt",
                         side_effect=errors.EnvError("declined")), \
-             mock.patch("anci.converge.converge") as infra:
+             mock.patch("anci.inspect.run.converge") as infra:
             with self.assertRaises(errors.EnvError):
                 cli._run_env(self.conf, "prod", ["up"], debug=False)
         infra.assert_not_called()
@@ -109,7 +111,7 @@ class TestReconcileDispatch(unittest.TestCase):
 
     def test_reconcile_only_converges(self):
         with mock.patch("anci.providers.libvirt.vm_reconcile") as vm, \
-             mock.patch("anci.converge.converge") as infra, \
+             mock.patch("anci.inspect.run.converge") as infra, \
              mock.patch("anci.providers.libvirt.env_up") as up, \
              mock.patch("anci.commands.deploy.deploy") as deploy, \
              mock.patch("anci.commands.dbs.migrate") as migrate:
@@ -132,7 +134,7 @@ class TestReconcileDispatch(unittest.TestCase):
         order = []
         with mock.patch("anci.providers.libvirt.vm_reconcile", side_effect=lambda *a: order.append("vm")), \
              mock.patch("anci.secrets.sync_recipients", side_effect=lambda *a, **k: order.append("recipients")) as sync, \
-             mock.patch("anci.converge.converge", side_effect=lambda *a, **k: order.append("converge")):
+             mock.patch("anci.inspect.run.converge", side_effect=lambda *a, **k: order.append("converge")):
             cli._run_env(self.conf, "dev", ["reconcile"], debug=False)
         self.assertEqual(order, ["vm", "recipients", "converge"])
         sync.assert_called_once_with(self.conf, "dev")
@@ -140,7 +142,7 @@ class TestReconcileDispatch(unittest.TestCase):
     def test_reconcile_stops_when_the_secrets_cannot_be_re_encrypted(self):
         with mock.patch("anci.providers.libvirt.vm_reconcile"), \
              mock.patch("anci.secrets.sync_recipients", side_effect=errors.AuthError("no")), \
-             mock.patch("anci.converge.converge") as infra:
+             mock.patch("anci.inspect.run.converge") as infra:
             with self.assertRaises(errors.AuthError):
                 cli._run_env(self.conf, "dev", ["reconcile"], debug=False)
         infra.assert_not_called()

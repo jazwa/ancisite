@@ -110,8 +110,10 @@ def _facts(**kw) -> lvm.DomainFacts:
 
 @contextlib.contextmanager
 def _with(hv, *, version_sha=None):
-    """Route `hypervisor()` to `hv` and stub the version map + artifacts dir."""
+    """Route `hypervisor()` (and `libvirt_hypervisor()`) to `hv` and stub the
+    version map + artifacts dir."""
     with mock.patch.object(lvm, "hypervisor", return_value=hv), \
+         mock.patch.object(lvm, "libvirt_hypervisor", return_value=hv), \
          mock.patch.object(lvm, "versions_mod") as vmod, \
          mock.patch.object(lvm.time, "sleep"), \
          contextlib.redirect_stdout(io.StringIO()) as out:
@@ -165,6 +167,29 @@ class TestHypervisorTransport(unittest.TestCase):
             hv = hv_mod.hypervisor(_conf(), "dev")
         self.assertIsNone(hv.login)
         run.assert_called_once_with(["sudo", "-v"])
+
+    def test_libvirt_group_member_runs_virsh_without_sudo(self):
+        ok = subprocess.CompletedProcess([], 0, "qemu:///system\n", "")
+        with mock.patch.object(hv_mod.subprocess, "run", return_value=ok) as run:
+            hv = hv_mod.libvirt_hypervisor(_conf(), "dev")
+        self.assertFalse(hv.sudo)
+        self.assertNotIn(["sudo", "-v"], [c.args[0] for c in run.call_args_list])
+
+    def test_libvirt_refusing_you_falls_back_to_sudo(self):
+        refused = subprocess.CompletedProcess([], 1, "", "permission denied")
+        ok = subprocess.CompletedProcess([], 0)
+        with mock.patch.object(hv_mod.subprocess, "run", side_effect=[refused, ok]) as run:
+            hv = hv_mod.libvirt_hypervisor(_conf(), "dev")
+        self.assertTrue(hv.sudo)
+        self.assertEqual(run.call_args_list[-1].args[0], ["sudo", "-v"])
+
+    def test_libvirt_hypervisor_for_a_remote_host_is_the_usual_one(self):
+        conf = _conf("10.0.0.5")
+        with mock.patch.object(hv_mod.auth, "authorize", return_value="jack"), \
+             mock.patch.object(hv_mod.subprocess, "run") as run:
+            hv = hv_mod.libvirt_hypervisor(conf, "dev")
+        self.assertEqual(hv.login, "jack@10.0.0.5")
+        run.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +386,8 @@ class TestResize(unittest.TestCase):
                           _facts(running=True))
         self.assertIn(("setvcpus", "d", "4", "--live", "--config"), hv.calls)
         self.assertIn(("setmem", "d", "2048", "--live", "--config"), hv.calls)
-        self.assertIn(("blockresize", "d", "/d.qcow2", "99"), hv.calls)
+        # in bytes: virsh reads a bare number as KiB (22 GiB became 22 TiB once)
+        self.assertIn(("blockresize", "d", "/d.qcow2", "99B"), hv.calls)
 
     def test_apply_stopped_is_config_only_and_grows_the_file(self):
         hv = FakeHypervisor()
@@ -391,9 +417,22 @@ class TestVmReconcile(unittest.TestCase):
     def test_adopt_is_a_noop(self):
         conf = _conf("203.0.113.10")
         conf.envs["dev"].mode = "adopt"
-        with mock.patch.object(lvm, "hypervisor") as hvf:
+        with mock.patch.object(lvm, "hypervisor") as hvf, \
+             mock.patch.object(lvm, "libvirt_hypervisor") as lhvf:
             lvm.vm_reconcile(conf, "dev")
         hvf.assert_not_called()
+        lhvf.assert_not_called()
+
+    def test_resizes_through_libvirt_alone(self):
+        # only virsh: no root scripts, so no sudo for a libvirt group member
+        hv = FakeHypervisor(states=["running"], virsh_out={
+            "dumpxml": DUMPXML, "domblkinfo": f"Capacity: {20 * 1024 ** 3}\n"})
+        conf = _conf()
+        conf.envs["dev"].vcpus = 3
+        with _with(hv):
+            lvm.vm_reconcile(conf, "dev")
+        self.assertEqual(hv.scripts, [])
+        self.assertIn(("setvcpus", _dom(conf), "3", "--live", "--config"), hv.calls)
 
     def test_running_box_is_resized(self):
         hv = FakeHypervisor(states=["running"])
@@ -506,3 +545,35 @@ class TestRequireRunning(unittest.TestCase):
         with mock.patch.object(lvm.subprocess, "run") as run:
             lvm.require_running(conf, "dev")
         run.assert_not_called()
+
+
+class TestVmDifferences(unittest.TestCase):
+    """`plan`'s VM line: read as you, never through sudo on this machine."""
+
+    def _diff(self, conf, facts=None, raises=None):
+        from anci.providers import libvirt as lv
+        with mock.patch.object(lv, "_domain_facts", side_effect=raises, return_value=facts) as read:
+            out = lv.vm_differences(conf, "dev")
+        return out, read
+
+    def _conf(self, **vm):
+        conf = mock.Mock()
+        env = mock.Mock(adopted=False, ip="127.0.0.1", **{"vcpus": 2, "mem": "2gb", "disk": "20gb", **vm})
+        env.name = "dev"
+        conf.envs = {"dev": env}
+        return conf
+
+    def test_reads_without_sudo_and_names_what_differs(self):
+        from anci.providers import libvirt as lv
+        facts = lv.DomainFacts(running=True, vcpus=2, max_vcpus=2, mem_kib=2 * 1024 ** 2,
+                               max_mem_kib=2 * 1024 ** 2, disk_path="/d", disk_bytes=20 * 1024 ** 3)
+        with mock.patch.object(lv.paths, "box_id", return_value="b"):
+            out, read = self._diff(self._conf(vcpus=4, disk="40gb"), facts=facts)
+        self.assertFalse(read.call_args.args[0].sudo)
+        self.assertEqual(out, {"vcpus": ("2", "4"), "disk": ("20 GiB", "40 GiB")})
+
+    def test_nothing_when_libvirt_refuses(self):
+        from anci import errors
+        with mock.patch("anci.providers.libvirt.paths.box_id", return_value="b"):
+            out, _ = self._diff(self._conf(), raises=errors.EnvError("permission denied"))
+        self.assertEqual(out, {})

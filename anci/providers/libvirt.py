@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from .. import errors, net, paths, ui, versions as versions_mod
 from ..box import is_remote, is_remote_host
 from ..ssh import pin_path
-from ..hypervisor import Hypervisor, hypervisor
+from ..hypervisor import Hypervisor, hypervisor, libvirt_hypervisor
 from ..render.cloudinit import render_network_config, render_userdata
 from ..conf import Conf, Env, disk_to_qemu, mem_to_kib, mem_to_mib
 
@@ -269,7 +269,9 @@ def _disk_capacity(hv: Hypervisor, dom_name: str, path: str, running: bool) -> i
     return int(json.loads(out)["virtual-size"])
 
 
-def _domain_facts(hv: Hypervisor, dom_name: str) -> DomainFacts:
+def _domain_facts(hv: Hypervisor, dom_name: str, *, disk_optional: bool = False) -> DomainFacts:
+    """`disk_optional`: when the disk's size can't be read (a stopped VM's image
+    is root's file, and `hv` may not run as root), leave it unknown."""
     root = ET.fromstring(hv.virsh("dumpxml", dom_name).stdout)
     running = _domain_running(hv, dom_name)
     vcpu = root.find("vcpu")
@@ -286,7 +288,13 @@ def _domain_facts(hv: Hypervisor, dom_name: str) -> DomainFacts:
             if src is not None and src.get("file"):
                 disk_path = src.get("file")
                 break
-    disk_bytes = _disk_capacity(hv, dom_name, disk_path, running) if disk_path else None
+    disk_bytes = None
+    if disk_path:
+        try:
+            disk_bytes = _disk_capacity(hv, dom_name, disk_path, running)
+        except errors.EnvError:
+            if not disk_optional:
+                raise
     return DomainFacts(running, cur_vcpus, max_vcpus, mem, max_mem, disk_path, disk_bytes)
 
 
@@ -376,7 +384,8 @@ def _apply_resize(hv: Hypervisor, dom_name: str, plan: ResizePlan, facts: Domain
                             facts.running and not plan.mem_config, "memory", plan.notes)
     if plan.disk_bytes is not None:
         if facts.running:
-            hv.virsh("blockresize", dom_name, facts.disk_path, str(plan.disk_bytes))
+            # a bare number is KiB to blockresize: the "B" makes it bytes
+            hv.virsh("blockresize", dom_name, facts.disk_path, f"{plan.disk_bytes}B")
         else:
             hv.root(f"qemu-img resize {shlex.quote(facts.disk_path)} {plan.disk_bytes}",
                     f"growing the box's disk ({facts.disk_path})")
@@ -389,6 +398,31 @@ def _facts_summary(facts: DomainFacts) -> str:
     else:
         parts.append("disk ?")
     return ", ".join(parts)
+
+
+def vm_differences(conf: Conf, env_name: str) -> dict[str, tuple[str, str]]:
+    """How the env's VM differs in size from the conf, for `plan`: field ->
+    (the VM's value, the conf's). Read-only. On this dev machine it reads as
+    you, without sudo, which works when you're in the `libvirt` group; when
+    libvirt refuses, or there's no VM (an adopted box), it's {}."""
+    env = conf.envs.get(env_name)
+    if env is None or is_remote(env):
+        return {}
+    hv = hypervisor(conf, env_name) if is_remote_host(env) else Hypervisor(sudo=False)
+    dom_name = net.domain_name(paths.box_id(conf), env.name)
+    try:
+        facts = _domain_facts(hv, dom_name, disk_optional=True)
+    except (errors.EnvError, ET.ParseError):
+        return {}
+    plan = _resize_plan(env, facts)
+    out = {}
+    if plan.vcpus is not None:
+        out["vcpus"] = (str(facts.vcpus), str(plan.vcpus))
+    if plan.mem_kib is not None:
+        out["mem"] = (f"{facts.mem_kib // 1024} MiB", f"{plan.mem_kib // 1024} MiB")
+    if plan.disk_bytes is not None:
+        out["disk"] = (f"{facts.disk_bytes // (1024 ** 3)} GiB", f"{plan.disk_bytes // (1024 ** 3)} GiB")
+    return out
 
 
 def _reconcile_domain(hv: Hypervisor, env: Env, dom_name: str) -> tuple[bool, str]:
@@ -445,11 +479,12 @@ def require_running(conf: Conf, env_name: str) -> None:
 
 def vm_reconcile(conf: Conf, env_name: str) -> None:
     """Resize a managed box to the conf, and refuse one that isn't running.
-    Adopted boxes: no-op (no hypervisor)."""
+    Adopted boxes: no-op (no hypervisor). Only virsh runs here (a running VM
+    is resized live), so a `libvirt` group member needs no sudo."""
     env = conf.envs.get(env_name)
     if env is None or is_remote(env):
         return
-    hv = hypervisor(conf, env_name)
+    hv = libvirt_hypervisor(conf, env_name)
     _require_daemon(hv)
     dom_name = net.domain_name(paths.box_id(conf), env.name)
     if not _domain_exists(hv, dom_name):
@@ -524,9 +559,10 @@ def _managed_env(conf: Conf, env_name: str) -> Env:
 
 
 def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
-           force: bool = False) -> str | None:
+           force: bool = False, pipe: ui.Pipeline | None = None) -> str | None:
     """Provision/boot the box for an env from conf. Returns its address, or
-    None when the user aborted a --recreate (nothing was touched)."""
+    None when the user aborted a --recreate (nothing was touched). `pipe`: the
+    caller's pipeline to report in (`up` goes on to converge in it, and ends it)."""
     env = _managed_env(conf, env_name)
     hv = hypervisor(conf, env_name)
     _require_daemon(hv)
@@ -546,7 +582,8 @@ def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
     )
     print(f"  {ui.dim(f'assigned address {ip}{where}')}\n")
 
-    pipe = ui.Pipeline()
+    own = pipe is None
+    pipe = pipe or ui.Pipeline()
     base_image = f"{IMAGES_DIR}/{entry.debian_image_url.rsplit('/', 1)[-1]}"
     step = pipe.step("base image")
     with ui.Spinner(f"fetching the VM image{where}"):
@@ -611,7 +648,8 @@ def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
     with ui.Spinner("waiting for the box to answer ssh"):
         _wait_for_ssh_port(hv, ip, dom_name)
     step.done("reachable")
-    pipe.done()
+    if own:
+        pipe.done()
     return ip
 
 

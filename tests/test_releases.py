@@ -59,11 +59,8 @@ class TestIdentifyUser(unittest.TestCase):
 
 class TestAppend(unittest.TestCase):
     def test_appends_jsonl_line(self):
-        # append uses sudo (root) so any deployer can append regardless of umask
-        calls = []
-        with mock.patch.object(releases.ssh, "sudo", side_effect=lambda conn, s: calls.append(s)):
-            releases.append("1.2.3.4", "demo", env="dev", blob="abc", source="./s", user="jack")
-        s = calls[0]
+        # run as root (apply's script), so any deployer can append regardless of umask
+        s = releases.append_script("demo", env="dev", blob="abc", source="./s", user="jack")
         self.assertIn(f"install -d -o root -g anci -m 2775 {releases.RELEASES_DIR}/demo", s)
         self.assertIn(">>", s)
         self.assertIn('{"ts":', s.replace("'", ""))
@@ -71,11 +68,9 @@ class TestAppend(unittest.TestCase):
         self.assertNotIn('"static"', s)
 
     def test_records_the_static_version_when_shipped(self):
-        calls = []
-        with mock.patch.object(releases.ssh, "sudo", side_effect=lambda conn, s: calls.append(s)):
-            releases.append("1.2.3.4", "demo", env="dev", blob="abc", source="./s", user="jack",
-                            static="0123456789abcdef")
-        self.assertIn('"static":"0123456789abcdef"', calls[0])
+        s = releases.append_script("demo", env="dev", blob="abc", source="./s", user="jack",
+                                   static="0123456789abcdef")
+        self.assertIn('"static":"0123456789abcdef"', s)
 
 
 if __name__ == "__main__":

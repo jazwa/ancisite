@@ -21,10 +21,10 @@ Everything is a file on the host (root-owned, written through the host's
 
 from __future__ import annotations
 
-import hashlib
 import shlex
 
 from . import errors, net, paths, ssh
+from .hashes import sha256_text
 from .render import caddy
 from .render.edge import (
     APPLY_SCRIPT, HOOK_FILE, ROUTE_FILE, RULESET_FILE,
@@ -32,10 +32,6 @@ from .render.edge import (
 )
 from .conf import Conf, allocate_ports
 from .hypervisor import Hypervisor
-
-
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _read_owner(route_lines: list[str]) -> str | None:
@@ -85,7 +81,7 @@ def reconcile(conf: Conf, env_name: str, user: str) -> str | None:
         APPLY_SCRIPT: (render_apply_script(), "0755"),
         HOOK_FILE: (render_hook(), "0755"),
     }
-    changed = [p for p, (text, _) in desired.items() if ssh.fact(found, p) != _sha(text)]
+    changed = [p for p, (text, _) in desired.items() if ssh.fact(found, p) != sha256_text(text)]
     q = shlex.quote
     for path in changed:
         text, mode = desired[path]

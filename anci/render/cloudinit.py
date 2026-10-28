@@ -6,20 +6,31 @@ from __future__ import annotations
 
 import json
 
+from .shell import sudoers_line
+
 
 def render_userdata(users: dict[str, list[str]]) -> str:
     """One guest account per conf user: their own account + `authorized_keys`
     + passwordless sudo, in the shared `anci` group that owns `/var/lib/anci`.
     The shared `anci` *service* user is created later, idempotently, by
-    `up`/`deploy`/`migrate` — not here."""
+    `up`/`deploy`/`migrate` — not here.
+
+    The sudo grant is the very file anci's `user` resource writes and revokes
+    (`/etc/sudoers.d/anci-<name>`), not cloud-init's `sudo:` key, whose own
+    sudoers file anci would never see — a revoked user would keep sudo."""
     if not users:
         raise ValueError("no users: refusing to render a guest nobody can reach")
     doc = {
         "groups": ["anci"],
         "users": [
-            {"name": name, "groups": ["anci"], "sudo": "ALL=(ALL) NOPASSWD:ALL",
+            {"name": name, "groups": ["anci"],
              "shell": "/bin/bash", "ssh_authorized_keys": list(keys)}
             for name, keys in users.items()
+        ],
+        "write_files": [
+            {"path": f"/etc/sudoers.d/anci-{name}", "content": sudoers_line(name),
+             "permissions": "0440"}
+            for name in users
         ],
         "ssh_pwauth": False,
         # no packages: sqlite3/litestream/caddy ship vendored on the first

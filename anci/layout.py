@@ -34,6 +34,7 @@ LOG_DIR = "/var/log/anci"
 
 ETC_DIR = "/etc/anci"
 UNITS_DIR = f"{ETC_DIR}/units"
+SYSTEMD_DIR = "/etc/systemd/system"
 CADDY_DIR = f"{ETC_DIR}/caddy"
 CADDY_FILE = f"{CADDY_DIR}/Caddyfile"
 LITESTREAM_FILE = f"{ETC_DIR}/litestream.yaml"
@@ -136,6 +137,16 @@ SHARED_DIRS = (
 )
 # rendered config, root-owned
 CONFIG_DIRS = (ETC_DIR, UNITS_DIR, CADDY_DIR)
+
+
+def unit_path(unit: str) -> str:
+    """Where anci renders a unit (`/etc/anci/units/<unit>`)."""
+    return f"{UNITS_DIR}/{unit}"
+
+
+def unit_link(unit: str) -> str:
+    """The systemd link to a rendered unit (`/etc/systemd/system/<unit>`)."""
+    return f"{SYSTEMD_DIR}/{unit}"
 
 
 def log_path(exe_name: str) -> str:

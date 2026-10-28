@@ -11,11 +11,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from anci import auth, errors, layout, ssh, staticfiles
-from anci.apply import sha256_file
+from anci import auth, errors, layout, staticfiles
+from anci.hashes import sha256_file
 from anci.commands import deploy as dep
 from anci.conf import ConfError, load
-from anci.converge import run as run_mod
+from anci.inspect import walk
 
 CONF = """
 [user.jack]
@@ -132,24 +132,59 @@ class TestScan(unittest.TestCase):
 
 
 class TestGc(unittest.TestCase):
+    def _gc(self, root: Path) -> None:
+        """GC as a run has it: a step of the script, under `set -e`."""
+        with mock.patch.object(layout, "EXE_DIR", str(root / "exe")), \
+             mock.patch.object(layout, "BLOB_DIR", str(root / "blobs")), \
+             mock.patch.object(layout, "EXT_DIR", str(root / "ext")), \
+             mock.patch.object(layout, "SQLITE_BIN", str(root / "bin" / "sqlite3")):
+            script = walk.script([walk._gc()])
+        subprocess.run(["bash", "-c", script], check=True, capture_output=True)
+
     def test_keeps_the_target_and_young_dirs_removes_the_rest(self):
         with tempfile.TemporaryDirectory() as td:
-            exe = Path(td) / "exe"
-            app = exe / "app"
+            app = Path(td) / "exe" / "app"
             old = time.time() - 3600
-            for name in ("static-aaaa", "static-bbbb", ".static-tmp-1", "static-young"):
+            for name in ("static-aaaa", "static-bbbb", ".static-tmp", "static-young"):
                 (app / name).mkdir(parents=True)
                 if name != "static-young":
                     os.utime(app / name, (old, old))
             (app / "static").symlink_to(app / "static-aaaa")
-            scripts = []
-            with mock.patch.object(layout, "EXE_DIR", str(exe)), \
-                 mock.patch.object(ssh, "script"), \
-                 mock.patch.object(ssh, "sudo", side_effect=lambda c, s, **kw: scripts.append(s)):
-                run_mod._gc(mock.Mock())
-            subprocess.run(["bash", "-c", scripts[0]], check=True)
+            self._gc(Path(td))
             self.assertEqual(sorted(p.name for p in app.iterdir()),
                              ["static", "static-aaaa", "static-young"])
+
+    def test_keeps_linked_and_young_blobs_removes_the_rest(self):
+        with tempfile.TemporaryDirectory() as td:
+            blobs, app = Path(td) / "blobs", Path(td) / "exe" / "app"
+            blobs.mkdir()
+            app.mkdir(parents=True)
+            old = time.time() - 3600
+            for name in ("current", "static-file", "orphan", "young"):
+                (blobs / name).write_text(name)
+                if name != "young":
+                    os.utime(blobs / name, (old, old))
+            (app / "current").symlink_to(blobs / "current")
+            (app / "static-v").mkdir()
+            (app / "static-v" / "a.css").symlink_to(blobs / "static-file")
+            (app / "static").symlink_to(app / "static-v")
+            self._gc(Path(td))
+            self.assertEqual(sorted(p.name for p in blobs.iterdir()),
+                             ["current", "static-file", "young"])
+
+    def test_with_no_exe_deployed_a_vendored_binary_is_kept(self):
+        # no exe dir matches the globs; the reference listing must still finish
+        with tempfile.TemporaryDirectory() as td:
+            blobs = Path(td) / "blobs"
+            blobs.mkdir()
+            (Path(td) / "bin").mkdir()
+            old = time.time() - 3600
+            for name in ("sqlite", "orphan"):
+                (blobs / name).write_text(name)
+                os.utime(blobs / name, (old, old))
+            (Path(td) / "bin" / "sqlite3").symlink_to(blobs / "sqlite")
+            self._gc(Path(td))
+            self.assertEqual(sorted(p.name for p in blobs.iterdir()), ["sqlite"])
 
 
 @contextlib.contextmanager
@@ -172,7 +207,7 @@ class TestDeploy(unittest.TestCase):
              mock.patch.object(dep, "converge", return_value="ip") as c:
             tree(td / "public", {"index.html": b"hi"})
             dep.deploy(conf, "app", "dev")
-        scanned = c.call_args.kwargs["statics"]["app"]
+        scanned = c.call_args.kwargs["inputs"]["exe"].statics["app"]
         self.assertTrue(layout.is_static_id(scanned.id))
         self.assertEqual(scanned.root, td / "public")
 
@@ -180,7 +215,7 @@ class TestDeploy(unittest.TestCase):
         with project(CONF.replace("static = './public'\n", "")) as (td, conf), \
              mock.patch.object(dep, "converge", return_value="ip") as c:
             dep.deploy(conf, "app", "dev")
-        self.assertEqual(c.call_args.kwargs["statics"], {})
+        self.assertEqual(c.call_args.kwargs["inputs"]["exe"].statics, {})
 
 
 if __name__ == "__main__":

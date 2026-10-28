@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest import mock
 
 from anci.providers import adopt as adopt_mod
-from anci import apply as apply_mod
 from anci.commands import dbs, deploy
 from anci import errors, layout, releases, ssh
 from anci.providers.adopt import (
@@ -19,7 +18,6 @@ from anci.providers.adopt import (
     verify_checks,
 )
 from anci.render.shell import render_accounts_script
-from anci.apply import ApplyResult
 from anci.conf import Conf, Env, User, load
 from anci.box import is_remote
 
@@ -100,14 +98,14 @@ class TestRenderAccountsScript(unittest.TestCase):
         self.assertIn("ssh-ed25519 AAAA c", script)
         self.assertIn("gpasswd -d", script)  # stale-member revocation
 
-    def test_empties_authorized_keys_before_writing(self):
-        # keys are written idempotently: truncate then append each conf key
+    def test_writes_exactly_the_conf_keys(self):
+        # the whole file at once, so a key dropped from the conf is gone
         script = render_accounts_script({"jack": ["k1", "k2"]})
-        truncate = script.index(": > /home/jack/.ssh/authorized_keys")
-        k1 = script.index("k1")
-        k2 = script.index("k2")
-        self.assertLess(truncate, k1)
-        self.assertLess(k1, k2)
+        self.assertIn("printf '%s' 'k1\nk2\n' > /home/jack/.ssh/authorized_keys", script)
+
+    def test_revoking_drops_the_sudo_grant_too(self):
+        script = render_accounts_script({"jack": ["k1"]})
+        self.assertIn('rm -f /etc/sudoers.d/anci-"$u"', script)
 
 
 class TestPreflightChecks(unittest.TestCase):

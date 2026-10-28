@@ -139,12 +139,13 @@ def _info_names(ctx, param, incomplete):
 @click.option("--user", help="Adopted box, first up only: the login for the setup (default: root).")
 @click.pass_obj
 def up(obj, recreate, force, user):
-    from .converge import converge
+    from .inspect.run import converge
     from .providers.adopt import up_adopt
     from .providers.libvirt import env_up
 
     conf, env_name = obj["conf"], obj["env"]
     env = conf.envs[env_name]
+    pipe = ui.Pipeline()   # one report: the box, then the converge
     if env.adopted:
         if recreate:
             raise errors.ConfError(
@@ -153,16 +154,17 @@ def up(obj, recreate, force, user):
                 try_="rebuild it with your provider, delete "
                      f"envs/{env_name}/hostkey, then: anci {env_name} up",
             )
-        up_adopt(conf, env_name, login_user=user)
+        up_adopt(conf, env_name, login_user=user, pipe=pipe)
     else:
         if user:
             raise errors.ConfError(
                 "--user only applies to an adopted box's first up",
                 why=f"anci provisions {env_name}'s VM and creates your account on it",
             )
-        if env_up(conf, env_name, recreate=recreate, force=force) is None:
+        if env_up(conf, env_name, recreate=recreate, force=force, pipe=pipe) is None:
             return  # --recreate aborted: nothing touched, nothing to converge
-    converge(conf, env_name, grow_disk=True)   # infra only: no new app bytes
+    converge(conf, env_name, grow_disk=True, pipe=pipe)   # infra only: no new app bytes
+    pipe.done()
 
 
 @click.command(help="Stop this env's box (keeps its disk).")
@@ -181,10 +183,18 @@ def status(obj):
     show(obj["conf"], obj["env"], debug=obj["debug"])
 
 
+@click.command(help="Show what differs between anci.toml and the box. Changes nothing.")
+@click.pass_obj
+def plan(obj):
+    from .commands.plan import plan as show
+
+    show(obj["conf"], obj["env"])
+
+
 @click.command(help="Bring the env in line with anci.toml. Ships no exes and runs no migrations.")
 @click.pass_obj
 def reconcile(obj):
-    from .converge import converge
+    from .inspect.run import converge
     from .providers.libvirt import vm_reconcile
     from .secrets import sync_recipients
 
@@ -266,7 +276,7 @@ def secrets(obj):
     secrets_edit(obj["conf"], obj["env"])
 
 
-ENV_VERBS = [up, down, status, reconcile, info, deploy, logs, migrate, regen, local_schema, secrets]
+ENV_VERBS = [up, down, status, plan, reconcile, info, deploy, logs, migrate, regen, local_schema, secrets]
 
 
 def _check_env(conf: Conf, env_name: str, verb: str | None) -> None:

@@ -7,6 +7,7 @@ from unittest import mock
 from anci.render import caddy
 from anci import edge, errors, net, paths
 from anci.conf import allocate_ports, load
+from anci.hashes import sha256_text
 
 
 def _conf(ip: str = "10.0.0.5", host: bool = True):
@@ -117,7 +118,7 @@ class TestReconcile(unittest.TestCase):
             edge.APPLY_SCRIPT: edge.render_apply_script(),
             edge.HOOK_FILE: edge.render_hook(),
         }
-        shas = {p: edge._sha(t) for p, t in texts.items()}
+        shas = {p: sha256_text(t) for p, t in texts.items()}
         fake = FakeHost(route=texts[edge.ROUTE_FILE], shas=shas)
         self.assertEqual(_reconcile(conf, fake), "unchanged")
         self.assertFalse([s for s, i in fake.scripts if i is not None])

@@ -1,0 +1,4 @@
+CREATE TABLE ticks (
+    id INTEGER PRIMARY KEY,
+    at TEXT NOT NULL
+);

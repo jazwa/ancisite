@@ -10,7 +10,7 @@ from anci import box
 from anci import auth as _auth, errors, net, paths
 from anci.conf import ExeOverride
 from anci.commands import deploy as dep
-from anci.apply import sha256_file
+from anci.hashes import sha256_file
 from anci.conf import Exe, load
 
 CONF = """
@@ -103,7 +103,7 @@ class TestDeployShipsOnlyTheNamedExe(unittest.TestCase):
             conf.exes["worker"] = Exe(name="worker", source="/nonexistent/worker")
             with mock.patch.object(dep, "converge", return_value="ip") as c:
                 dep.deploy(conf, "app", "dev")
-        self.assertEqual(c.call_args.kwargs["binaries"], {"app": binary})
+        self.assertEqual(c.call_args.kwargs["inputs"]["exe"].binaries, {"app": binary})
 
 
 class TestDeployAll(unittest.TestCase):
@@ -120,9 +120,9 @@ class TestDeployAll(unittest.TestCase):
             with mock.patch.object(dep, "converge", return_value="ip") as c:
                 dep.deploy(conf, None, "dev")
         c.assert_called_once()
-        self.assertEqual(c.call_args.kwargs["binaries"],
+        self.assertEqual(c.call_args.kwargs["inputs"]["exe"].binaries,
                          {"app": Path(td) / "app", "worker": Path(td) / "worker"})
-        self.assertEqual(set(c.call_args.kwargs["source"]), {"app", "worker"})
+        self.assertEqual(set(c.call_args.kwargs["inputs"]["exe"].source), {"app", "worker"})
 
     def test_one_missing_build_ships_nothing(self):
         with conf_as("jack") as conf, tempfile.TemporaryDirectory() as td:

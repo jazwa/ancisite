@@ -22,9 +22,9 @@ per-site `request_body { max_size 100MB }` backstop. Never set `write`,
 L7 rate limiting stays in the app either way (stock Caddy has none).
 
 ### Box hardening — opt-in `harden` step  ·  `TODO(harden)` in `anci/providers/adopt.py`
-Converge makes sshd key-only on every box (`anci/converge/sshd.py`: password
+Converge makes sshd key-only on every box (`anci/inspect/singletons.py`: password
 and keyboard-interactive logins off, root by key only), and turns LLMNR off
-(`anci/converge/resolved.py`). The firewall is still the distro default, so a
+(`anci/inspect/singletons.py`). The firewall is still the distro default, so a
 future `0.0.0.0` bind is exposed. Tare's old Ansible (`devsec.hardening`
 + a UFW role) set, on prod:
 - sshd: `PasswordAuthentication no`, `PermitRootLogin no`, pubkey-only,

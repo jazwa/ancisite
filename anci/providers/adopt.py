@@ -90,10 +90,11 @@ def _checks_step(pipe: ui.Pipeline, label: str, conn: ssh.Conn, checks: dict[str
     step.done(ok)
 
 
-def up_adopt(conf: Conf, env_name: str, *, login_user: str | None = None) -> str:
+def up_adopt(conf: Conf, env_name: str, *, login_user: str | None = None,
+             pipe: ui.Pipeline | None = None) -> str:
     """`up` for an adopted box: bootstrap it on first contact or with `--user`
     (`login_user`), otherwise a no-op (the caller's converge does the rest).
-    Returns the address."""
+    `pipe`: the caller's pipeline to report in. Returns the address."""
     env = conf.envs[env_name]   # the CLI only dispatches defined envs
     address = env.ip
     if not env.adopted:
@@ -107,7 +108,7 @@ def up_adopt(conf: Conf, env_name: str, *, login_user: str | None = None) -> str
             print(f"\n  {ui.bold(env_name)} {ui.dim(f'→ {address} (set up; pinned in {pin.name})')}")
             return address
         print(f"\n  {ui.bold(env_name)} {ui.dim(f'→ {address} (pinned in {pin.name}; setting up as {login_user})')}\n")
-        _bootstrap(conf, env_name, login_user, pin)
+        _bootstrap(conf, env_name, login_user, pin, pipe)
         return address
 
     login_user = login_user or "root"
@@ -127,14 +128,15 @@ def up_adopt(conf: Conf, env_name: str, *, login_user: str | None = None) -> str
     with tempfile.TemporaryDirectory() as td:
         known = Path(td) / "hostkey"
         known.write_text("\n".join(keys) + "\n")
-        _bootstrap(conf, env_name, login_user, known)
+        _bootstrap(conf, env_name, login_user, known, pipe)
     pin = ssh.write_pin(conf, env_name, keys)
     print(f"  {ui.green('✓')} pinned {address} → {pin}")
     print(f"  {ui.dim('next: commit it (git add ' + str(pin) + ')')}")
     return address
 
 
-def _bootstrap(conf: Conf, env_name: str, login_user: str, known_hosts: Path) -> None:
+def _bootstrap(conf: Conf, env_name: str, login_user: str, known_hosts: Path,
+               pipe: ui.Pipeline | None = None) -> None:
     """Set the box up as `login_user`, over a connection verified against
     `known_hosts`: preflight, accounts, prerequisites, verify."""
     env = conf.envs[env_name]
@@ -143,7 +145,8 @@ def _bootstrap(conf: Conf, env_name: str, login_user: str, known_hosts: Path) ->
         opts=["-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
               "-o", f"UserKnownHostsFile={known_hosts}", "-o", "StrictHostKeyChecking=yes"],
     )
-    pipe = ui.Pipeline()
+    own = pipe is None
+    pipe = pipe or ui.Pipeline()
 
     # preflight: is this box supported? Fail before touching anything. Runs
     # unprivileged: passwordless sudo is one of the things it checks.
@@ -168,4 +171,5 @@ def _bootstrap(conf: Conf, env_name: str, login_user: str, known_hosts: Path) ->
                  what="the bootstrap left the box out of line",
                  try_=f"re-run `anci {env_name} up --user {login_user}`; if it persists, add --debug")
 
-    pipe.done()
+    if own:
+        pipe.done()

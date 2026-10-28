@@ -16,8 +16,11 @@ import shlex
 from dataclasses import dataclass
 from typing import NamedTuple
 
-from .. import auth, box, errors, layout, ssh, ui, units
+from .. import auth, box, errors, layout, ssh, ui
 from ..conf import Conf
+from ..inspect.db import paths as db_paths
+from ..inspect.exe import paths as exe_paths
+from ..inspect.singletons import env_paths
 
 
 @dataclass
@@ -52,79 +55,15 @@ def _int(s: str) -> int | None:
 # what each subject should show (paths are anci-owned; no ad-hoc strings)
 
 
-def _env_candidates(conf: Conf, env_name: str) -> list[tuple[str, str]]:
-    """Files the whole env shares: the secrets every exe gets, and litestream's
-    config + unit when any db replicates."""
-    rows = [(layout.SECRETS_FILE, "secrets (every exe)")]
-    if conf.replicated_dbs(env_name):
-        rows += [
-            (layout.LITESTREAM_FILE, "replication config"),
-            (f"{layout.UNITS_DIR}/{units.LITESTREAM_UNIT}", "replication unit"),
-        ]
-    return rows
-
-
-def _exe_candidates(conf: Conf, env_name: str, exe_name: str, *,
-                    shared: bool = True) -> list[tuple[str, str]]:
-    """`shared`: include the env-wide files this exe uses (a one-exe view)."""
-    exe = conf.exes[exe_name]
-    resolved = exe.resolve_for(env_name)
-    unit = units.service_name(exe_name)
-    rows = [
-        (layout.current_link(exe_name), "current version"),
-        (resolved.target, "what systemd runs"),
-        (f"{layout.UNITS_DIR}/{unit}", "unit"),
-        (f"/etc/systemd/system/{unit}", "enabled"),
-        (layout.log_path(exe_name), "log"),
-        (f"{layout.RELEASES_DIR}/{exe_name}/releases.jsonl", "deploy history"),
-    ]
-    if resolved.static:
-        rows.append((layout.static_link(exe_name), "current static files"))
-    if resolved.schedule is not None:
-        timer = units.timer_name(exe_name)
-        rows += [
-            (f"{layout.UNITS_DIR}/{timer}", "timer"),
-            (f"/etc/systemd/system/{timer}", "enabled"),
-        ]
-    if shared:
-        rows.append((layout.SECRETS_FILE, "secrets"))
-    return rows
-
-
-def _db_candidates(conf: Conf, env_name: str, db_name: str, *,
-                   shared: bool = True) -> list[tuple[str, str]]:
-    """`shared`: include the env-wide files this db uses (a one-db view)."""
-    db = conf.dbs[db_name]
-    data = layout.db_path(db_name)
-    rows = [
-        (data, "database"),
-        (f"{data}-wal", "write-ahead log"),
-        (f"{data}-shm", "WAL index"),
-    ]
-    if db.extensions:
-        rows.append((layout.ext_dir(db_name), "extensions"))
-        rows += [(f"{layout.ext_dir(db_name)}/{posixpath.basename(e)}", "extension")
-                 for e in db.extensions]
-    if not shared:
-        return rows
-    if db.resolve_for(env_name).replication:
-        rows += [
-            (layout.LITESTREAM_FILE, "replication config"),
-            (f"{layout.UNITS_DIR}/{units.LITESTREAM_UNIT}", "replication unit"),
-        ]
-    rows.append((layout.SECRETS_FILE, "secrets"))
-    return rows
-
-
 def _subjects(conf: Conf, env_name: str, kind: str | None,
               name: str | None) -> list[_Subject]:
     """What to show: one exe/db, or everything."""
     def exe_sub(n: str, shared: bool = True) -> _Subject:
         schedule = conf.exes[n].resolve_for(env_name).schedule or "always"
-        return _Subject("exe", n, _exe_candidates(conf, env_name, n, shared=shared), schedule)
+        return _Subject("exe", n, exe_paths(conf, env_name, n, shared=shared), schedule)
 
     def db_sub(n: str, shared: bool = True) -> _Subject:
-        return _Subject("db", n, _db_candidates(conf, env_name, n, shared=shared), None)
+        return _Subject("db", n, db_paths(conf, env_name, n, shared=shared), None)
 
     if kind is not None and name is None:
         raise errors.ConfError(
@@ -157,7 +96,7 @@ def _subjects(conf: Conf, env_name: str, kind: str | None,
     subs += [db_sub(n, shared=False) for n in conf.dbs]
     if not subs:
         raise errors.ConfError("this conf defines no exes or dbs")
-    return [_Subject("env", env_name, _env_candidates(conf, env_name), None), *subs]
+    return [_Subject("env", env_name, env_paths(conf, env_name), None), *subs]
 
 
 # ---------------------------------------------------------------------------

@@ -7,14 +7,15 @@ The deployed blob id is identity, not a readable version, so it lives in
 `anci info`, not here —
 a second boxed table for the conf's dbs — name, last migration (the guest's
 `_anci_migrations` bookkeeping), size (data file + wal), replication (the
-replica's last successful sync, read locally from the litestream daemon; the db rows replace a litestream checklist line) — and a
+replica's last successful sync, read locally from the litestream daemon; the db rows replace a litestream checklist line),
+destination (the `bucket/path` anci.toml replicates it to on this env) — and a
 checklist under it: caddy, the TLS front (litestream's health is per-db in the
 db table) — plus the ssh hint to log into the box.
-`--debug` adds the drift report: every file and link converge would write
-(judged against the same plan converge applies), the litestream binary version
-against the versions-map pin, and the release log against what's deployed.
+`--debug` adds the drift report: what `anci <env> plan` shows (everything on
+the box that differs from the conf) and the release log against what's deployed.
 
-Box state is read with one `ssh.facts` round trip; a down box degrades
+Box state is read with one round trip — box inspection's (`observed_state`),
+carrying this report's health probes too; a down box degrades
 gracefully instead of failing the whole report.
 """
 
@@ -27,33 +28,31 @@ import time
 from datetime import datetime
 
 from . import dbs
-from .. import apply as apply_mod, auth, box, errors, forward, layout, releases as rel_mod, ssh, ui, units, versions as versions_mod
-from ..converge.plan import plan_env
-from ..converge.run import build_context
+from .. import auth, box, errors, forward, layout, releases as rel_mod, ssh, ui, units
+from ..inspect import ObservedState, describe, diff, observed_state, target_state, worth_showing
+from ..inspect.exe import deployed
+from ..inspect.singletons import optional_services
+from ..render import litestream
 from ..layout import ANCI_USER
 from ..conf import Conf, allocate_ports
 
 
-def _mech_units(conf: Conf, env_name: str) -> list[str]:
-    """The mechanism units desired on this box (litestream, caddy).
+# the checklist's services (caddy, litestream), by their unit
+_SERVICES = {r.unit: r for r in optional_services()}
 
-    Mirrors converge.orphans.desired_unit_names: deploy installs each under the
-    same condition, so a listed unit the box doesn't have is genuinely missing.
-    """
-    out = []
-    if conf.replicated_dbs(env_name):
-        out.append(units.LITESTREAM_UNIT)
-    if any(conf.exes[e].resolve_for(env_name).host for e in conf.exes):
-        out.append(units.CADDY_UNIT)
-    return sorted(out)
+
+def _mech_units(conf: Conf, env_name: str) -> list[str]:
+    """The mechanism units desired on this box (litestream, caddy): those their
+    resources want, so a listed unit the box doesn't have is genuinely missing."""
+    return sorted(u for u, r in _SERVICES.items() if r.wanted(conf, env_name))
 
 
 def _probes(conf: Conf, exe_names: list[str], env_name: str, ports: dict) -> dict[str, str]:
-    """Every fact status reads from the box, keyed for `_read`."""
+    """The health facts status reads besides box inspection's (what runs, how
+    it's doing), keyed for `_read`."""
     p: dict[str, str] = {}
     for exe_name in exe_names:
         resolved = conf.exes[exe_name].resolve_for(env_name)
-        p[f"{exe_name} current"] = f"readlink {layout.current_link(exe_name)}"
         if resolved.schedule is not None:
             # a job is "up" when its timer is armed; report when it next fires.
             # NextElapseUSecRealtime is momentarily empty while the triggered
@@ -105,10 +104,6 @@ def _probes(conf: Conf, exe_names: list[str], env_name: str, ports: dict) -> dic
                      f'sed "s|^|$(basename "$(dirname "$f")")\t|" "$f"; done')
     for unit in _mech_units(conf, env_name):
         p[f"{unit} active"] = f"systemctl is-active {unit}"
-        p[f"{unit} enabled"] = f"systemctl is-enabled {unit}"
-        p[f"{unit} installed"] = f"[ -f {layout.UNITS_DIR}/{unit} ] && echo yes"
-    if conf.replicated_dbs(env_name):
-        p["litestream version"] = f"{layout.LITESTREAM_BIN} version || echo missing"
     # what the box's litestream actually replicates, whatever anci.toml says:
     # `<db path>\t<last successful sync>` per db it lists, from the daemon over its
     # control socket (a local read, no S3). `last_sync_at` freezes while uploads
@@ -207,7 +202,7 @@ class ExeState:
 @dataclass
 class MechState:
     active: str | None           # systemctl is-active
-    enabled: str | None          # systemctl is-enabled
+    enabled: bool                # it starts at boot
     installed: bool              # its unit file exists
 
 
@@ -230,23 +225,24 @@ class Report:
     releases: list[tuple[str, str]]     # (exe, jsonl line)
     mech: dict[str, MechState]
     dbs: dict[str, DbState]
-    litestream_ver: str | None
     litestream_up: bool = False           # the litestream unit is running
     disk: tuple[int, int] | None = None   # box state fs (used, usable) bytes
     mem: tuple[int, int] | None = None    # box ram (used, total) bytes
 
 
-def _read(found: dict[str, list[str]], conf: Conf, exe_names: list[str],
+def _read(observed: ObservedState, conf: Conf, exe_names: list[str],
           env_name: str) -> Report:
-    """The facts, shaped for the report."""
+    """The facts — box inspection's state, and this report's own probes
+    (`observed.extra`) — shaped for the report."""
+    found = observed.extra
+
     def fact(key):
         return ssh.fact(found, key)
 
     state = {}
     for e in exe_names:
-        cur = fact(f"{e} current")
         state[e] = ExeState(
-            current=cur.rsplit("/", 1)[-1] if cur else None,
+            current=deployed(observed, e),
             active=fact(f"{e} active") == "active",
             port=fact(f"{e} port") == "open",
             timer=fact(f"{e} timer") == "active",
@@ -255,11 +251,13 @@ def _read(found: dict[str, list[str]], conf: Conf, exe_names: list[str],
             cpu=_cpu_percent(fact(f"{e} cpu")),
             mem=_mem(fact(f"{e} mem")),
         )
-    mech = {
-        unit: MechState(active=fact(f"{unit} active"), enabled=fact(f"{unit} enabled"),
-                        installed=fact(f"{unit} installed") == "yes")
-        for unit in _mech_units(conf, env_name) if f"{unit} active" in found
-    }
+    mech = {}
+    for unit in _mech_units(conf, env_name):
+        if f"{unit} active" not in found:
+            continue
+        r = _SERVICES[unit]
+        mech[unit] = MechState(active=fact(f"{unit} active"), enabled=r.starts_at_boot(observed),
+                               installed=r.installed(observed))
     listed = dict((line.split("\t") + [""])[:2] for line in found.get("litestream dbs", []))
     dbs = {
         d: DbState(last=fact(f"{d} last"), size=_int(fact(f"{d} size")),
@@ -269,7 +267,7 @@ def _read(found: dict[str, list[str]], conf: Conf, exe_names: list[str],
     }
     releases = [tuple(line.split("\t", 1)) for line in found.get("releases", [])
                 if "\t" in line]
-    return Report(state, releases, mech, dbs, fact("litestream version"),
+    return Report(state, releases, mech, dbs,
                   litestream_up=fact("litestream active") == "active",
                   disk=_pair(fact("box disk")), mem=_pair(fact("box mem")))
 
@@ -291,32 +289,13 @@ def _latest_release(
     return latest
 
 
-def _plan_drift(conf: Conf, env_name: str, conn: ssh.Conn) -> list[str]:
-    """Every file/link converge would write that the box doesn't match — judged
-    against the very plan `up` converges to, so the two can't disagree."""
+def _box_changes(conf: Conf, env_name: str, observed: ObservedState) -> list[str]:
+    """`anci <env> plan`'s lines: everything on the box that differs from the conf."""
     try:
-        plan = plan_env(build_context(conf, env_name, conn,
-                                      local_ports=forward.installed_ports(conf, env_name)))
+        target = target_state(conf, env_name)
     except errors.Error as err:
-        return [f"couldn't verify the box's files ({err.what})"]
-    files = [(ds.name, f) for ds in plan.desired_states for f in ds.files]
-    links = [(ds.name, l) for ds in plan.desired_states for l in ds.links]
-    hashes, targets, _ = apply_mod.probe(conn, [f.path for _, f in files],
-                                         [l.path for _, l in links])
-    drift = []
-    for name, f in files:
-        have = hashes.get(f.path)
-        if have is None:
-            drift.append(f"{name}: {f.path} MISSING on the box")
-        elif have != apply_mod._sha(f.content):
-            drift.append(f"{name}: {f.path} drifted (edited on the box?)")
-    for name, l in links:
-        have = targets.get(l.path)
-        if have is None:
-            drift.append(f"{name}: {l.path} MISSING on the box")
-        elif have != l.target:
-            drift.append(f"{name}: {l.path} points at {have}, not {l.target}")
-    return drift
+        return [f"couldn't work out what the box should have ({err.what})"]
+    return [describe(c) for c in worth_showing(diff(observed, target))]
 
 
 def _box_stat_lines(report: Report) -> list[str]:
@@ -356,8 +335,7 @@ def _mech_check(unit: str, m: MechState | None) -> str:
         state, up = (raw or "unknown"), False
     bullet = ui.green("✓") if up else ui.red("✗")
     line = f"  {bullet} {unit} — {state}"
-    raw_enable = (m.enabled or "").strip()
-    if m.installed and not raw_enable.startswith("enabled"):
+    if m.installed and not m.enabled:
         line += f" {ui.yellow('· not enabled at boot')}"
     return line
 
@@ -410,6 +388,13 @@ def _replication_cell(conf: Conf, env_name: str, db_name: str, st: DbState,
     return "litestream error" if wanted and not litestream_up else "off"
 
 
+def _destination_cell(conf: Conf, env_name: str, db_name: str) -> str:
+    """The db table's destination cell: `bucket/path` the conf replicates it to on
+    this env (the same target `regen` restores from), or — when replication is off."""
+    db = conf.dbs[db_name].resolve_for(env_name)
+    return litestream.replica_target(db) if db.replication else "—"
+
+
 def _replication_notes(conf: Conf, env_name: str, report: "Report") -> list[str]:
     """One line per db whose replication on the box differs from anci.toml."""
     notes = []
@@ -434,29 +419,6 @@ def _unset_caddy_line() -> str:
     return f"  {ui.red('✗')} {ui.dim('caddy.service — not configured (no host)')}"
 
 
-def _litestream_drift(conf: Conf, env_name: str, ver: str | None) -> list[str]:
-    """Debug drift for the litestream binary itself: missing, or off-pin.
-
-    The pin is the env's anci-version entry — the same pin deploy vends the
-    binary from, so a mismatch means the box was touched by hand (or a vend
-    never ran).
-    """
-    if not conf.replicated_dbs(env_name):
-        return []
-    if ver == "missing":
-        return ["litestream: binary MISSING on the box"]
-    if not ver:
-        return []  # probe gap — say nothing rather than a red lie
-    try:
-        entry = versions_mod.get(versions_mod.load(), conf.envs[env_name].anci_version)
-    except errors.Error:
-        return []  # no versions map for this env — nothing to pin against
-    pin = entry.litestream
-    if pin and ver.lstrip("v") != pin:
-        return [f"litestream: binary version drifted (box: {ver}, pinned: {pin})"]
-    return []
-
-
 def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
     """One env's worth of the home screen: version, state, url, last deploy.
 
@@ -472,6 +434,7 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
     db_rows: list[list[str]] = []
     db_notes: list[str] = []
     drift: list[str] = []
+    changes: list[str] = []   # --debug: the box's differences from the conf (as `plan` shows them)
     mech_units = _mech_units(conf, env_name)
     # a remote env with a long-running exe serves HTTP; if no `host` routes it
     # through caddy, the front simply doesn't exist — note it so it's never
@@ -499,12 +462,12 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
         for exe_name in exe_names:
             rows.append([exe_name, ui.dim("no access"), "—", "—", "—", "—"])
         for db_name in db_names:
-            db_rows.append([db_name, "—", "—", "—"])
+            db_rows.append([db_name, "—", "—", "—", "—"])
     else:
         try:
             conn = ssh.connect(conf, env.name, caller)
-            found = ssh.facts(conn, _probes(conf, exe_names, env.name, ports))
-            parsed = _read(found, conf, exe_names, env.name)
+            observed = observed_state(conn, extra=_probes(conf, exe_names, env.name, ports))
+            parsed = _read(observed, conf, exe_names, env.name)
             down = False
         except ssh.SSHError as e:
             if e.auth or e.host_key:
@@ -514,7 +477,7 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
             down = bool(e.unreachable)
             if down:
                 hint = None  # a down box has no login to suggest
-            parsed = _read({}, conf, exe_names, env.name)
+            parsed = _read(ObservedState(), conf, exe_names, env.name)
 
         for exe_name in exe_names:
             if down:
@@ -574,8 +537,10 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
             # litestream speaks through the db table's replication column now.
             mech_checks = [_mech_check(u, None) for u in mech_units
                            if u != units.LITESTREAM_UNIT]
+            # the destination is conf-derived, so it still shows for a down box
             for db_name in db_names:
-                db_rows.append([db_name, "—", "—", "—"])
+                db_rows.append([db_name, "—", "—", "—",
+                                _destination_cell(conf, env_name, db_name)])
         else:
             for unit in mech_units:
                 if unit == units.LITESTREAM_UNIT:
@@ -584,8 +549,7 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
                 if m is not None:
                     mech_checks.append(_mech_check(unit, m))
             if debug:
-                drift += _plan_drift(conf, env.name, conn)
-                drift += _litestream_drift(conf, env.name, parsed.litestream_ver)
+                changes = _box_changes(conf, env.name, observed)
             for db_name in db_names:
                 st = parsed.dbs[db_name]
                 db_rows.append([
@@ -593,6 +557,7 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
                     f"{st.last}.sql" if st.last else "—",
                     ui.human_size(st.size) if st.size is not None else "—",
                     _replication_cell(conf, env_name, db_name, st, parsed.litestream_up),
+                    _destination_cell(conf, env_name, db_name),
                 ])
             db_notes = _replication_notes(conf, env_name, parsed)
         if unset_caddy:
@@ -607,7 +572,7 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
         print(ui.table(["exe", "state", "url", "cpu", "mem", "last deploy"], rows))
     if db_rows:
         print()
-        print(ui.table(["db", "last migration", "size", "replication"], db_rows))
+        print(ui.table(["db", "last migration", "size", "replication", "destination"], db_rows))
         for note in db_notes:
             print(f"  {ui.yellow('⚠')} {note}")
     box_stats = _box_stat_lines(parsed) if parsed is not None and not down else []
@@ -623,8 +588,10 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
                 print()
             print(f"  {ui.dim('ssh with ')}{hint}")
     if debug:
-        if drift:
+        if drift or changes:
             print(f"\n  {ui.red('drift:')}")
+            for c in changes:
+                print(f"  {c}")
             for d in drift:
                 print(f"  - {d}")
         else:

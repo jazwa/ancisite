@@ -188,7 +188,12 @@ class TestRenderUserdata(unittest.TestCase):
                          ["ssh-ed25519 AAAA a", "ssh-ed25519 AAAA b"])
         self.assertEqual(users["alice"]["ssh_authorized_keys"], ["ssh-ed25519 AAAA c"])
         self.assertEqual(users["jack"]["groups"], ["anci"])
-        self.assertEqual(users["jack"]["sudo"], "ALL=(ALL) NOPASSWD:ALL")
+        # sudo through the file anci's user resource owns (and revokes), not
+        # cloud-init's `sudo:` key, whose sudoers file anci never sees
+        self.assertNotIn("sudo", users["jack"])
+        grant = next(f for f in doc["write_files"] if f["path"] == "/etc/sudoers.d/anci-jack")
+        self.assertEqual(grant["content"], "jack ALL=(ALL) NOPASSWD:ALL\n")
+        self.assertEqual(grant["permissions"], "0440")
         self.assertIs(doc["ssh_pwauth"], False)
 
     def test_key_comments_survive(self):

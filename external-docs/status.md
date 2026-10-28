@@ -10,7 +10,8 @@ Status shows what's running in the env.
 ## What it shows
 
 - **Exes.** Each exe's deployed version, its state, its URL, and who deployed it last and when.
-- **Databases.** Each db's last applied migration, its size, and how far its replica is behind.
+- **Databases.** Each db's last applied migration, its size, how far its replica is behind, and where the
+  replica goes (`bucket/path`, or — when replication is off).
 - **Caddy.** Whether the HTTPS front is running. On a remote env with no `host` it shows "not configured": your
   exes have no public HTTPS URL.
 - **How to ssh in.** The ssh command for the box.
@@ -43,9 +44,9 @@ The URL is shown only when the exe is answering.
 
 ## --debug
 
-Also lists anything in the env that differs from `anci.toml`: files or links that are missing or edited, a
-litestream version other than the pinned one, and a release log that disagrees with what's deployed. A clean env
-says "no drift".
+Also lists anything in the env that differs from `anci.toml`: what `anci <env> plan` shows (including a caddy,
+litestream or sqlite3 binary other than the pinned one), and a release log that disagrees with what's deployed. A
+clean env says "no drift".
 
 ## Next steps
 

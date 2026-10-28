@@ -43,9 +43,10 @@ class TestRegen(unittest.TestCase):
              mock.patch.object(dbs.auth, "authorize", return_value="jack"), \
              mock.patch.object(dbs.ssh, "connect", return_value=ssh.Conn(ip="x")), \
              mock.patch.object(dbs.ssh, "sudo", side_effect=sudo or _record), \
-             mock.patch.object(dbs.lifecycle, "stop_app_units",
+             mock.patch.object(dbs, "observed_state"), \
+             mock.patch.object(dbs.exe_mod, "stop_steps", return_value=[],
                                side_effect=lambda *a: calls.append("stop")) as stop, \
-             mock.patch.object(dbs.lifecycle, "start_conf_units",
+             mock.patch.object(dbs.exe_mod, "start_steps", return_value=[],
                                side_effect=lambda *a: calls.append("start")) as start, \
              mock.patch.object(dbs.boxlock, "hold", new=_lock), \
              contextlib.redirect_stdout(io.StringIO()) as out:
@@ -104,8 +105,9 @@ class TestRegen(unittest.TestCase):
         with mock.patch.object(dbs.auth, "authorize", return_value="jack"), \
              mock.patch.object(dbs.ssh, "connect", return_value=ssh.Conn(ip="x")), \
              mock.patch.object(dbs.ssh, "sudo", side_effect=boom), \
-             mock.patch.object(dbs.lifecycle, "stop_app_units") as stop, \
-             mock.patch.object(dbs.lifecycle, "start_conf_units") as start, \
+             mock.patch.object(dbs, "observed_state"), \
+             mock.patch.object(dbs.exe_mod, "stop_steps", return_value=[]) as stop, \
+             mock.patch.object(dbs.exe_mod, "start_steps", return_value=[]) as start, \
              mock.patch.object(dbs.boxlock, "hold",
                                new=lambda *a, **kw: contextlib.nullcontext()), \
              contextlib.redirect_stdout(io.StringIO()):
@@ -160,8 +162,9 @@ class TestRegenAll(unittest.TestCase):
         with mock.patch.object(dbs.auth, "authorize", return_value="jack"), \
              mock.patch.object(dbs.ssh, "connect", return_value=ssh.Conn(ip="x")), \
              mock.patch.object(dbs.ssh, "sudo", side_effect=_sudo), \
-             mock.patch.object(dbs.lifecycle, "stop_app_units", side_effect=lambda *a: calls.append("stop")), \
-             mock.patch.object(dbs.lifecycle, "start_conf_units", side_effect=lambda *a: calls.append("start")), \
+             mock.patch.object(dbs, "observed_state"), \
+             mock.patch.object(dbs.exe_mod, "stop_steps", return_value=[], side_effect=lambda *a: calls.append("stop")), \
+             mock.patch.object(dbs.exe_mod, "start_steps", return_value=[], side_effect=lambda *a: calls.append("start")), \
              mock.patch.object(dbs.boxlock, "hold", side_effect=lambda *a: contextlib.nullcontext()), \
              contextlib.redirect_stdout(io.StringIO()):
             dbs.db_regen(conf, None, "dev", force=True)

@@ -21,37 +21,60 @@ ANCI_ACCOUNT_CMDS = (
 )
 
 
+def sudoers_line(name: str) -> str:
+    """A user's sudoers grant (`/etc/sudoers.d/anci-<name>`)."""
+    return f"{name} ALL=(ALL) NOPASSWD:ALL\n"
+
+
+def authorized_keys(keys: list[str]) -> str:
+    """A user's `authorized_keys`: one key per line."""
+    return "".join(f"{k}\n" for k in keys)
+
+
+def grant_script(name: str, keys: list[str]) -> str:
+    """Root shell giving `name` access: the account (created if missing), the
+    `anci` group, passwordless sudo, and exactly `keys`."""
+    n = _sh(name)
+    home = f"/home/{n}"
+    return "\n".join([
+        f"id -u {n} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash {n}",
+        f"usermod -aG {ANCI_GROUP} {n}",
+        f"printf '%s' {_sh(sudoers_line(name))} > /etc/sudoers.d/anci-{n}",
+        f"chmod 440 /etc/sudoers.d/anci-{n}",
+        f"install -d -o {n} -g {n} -m 700 {home}/.ssh",
+        f"printf '%s' {_sh(authorized_keys(keys))} > {home}/.ssh/authorized_keys",
+        f"chmod 600 {home}/.ssh/authorized_keys",
+        f"chown {n}:{n} {home}/.ssh/authorized_keys",
+    ])
+
+
+def revoke_script(name: str) -> str:
+    """Root shell taking `name`'s access away: group, sudo grant and keys. The
+    account stays (its files may matter); with no keys it can't log in."""
+    n = _sh(name)
+    return "\n".join([
+        f"gpasswd -d {n} {ANCI_GROUP} >/dev/null 2>&1 || true",
+        f"rm -f /etc/sudoers.d/anci-{n} /home/{n}/.ssh/authorized_keys",
+    ])
+
+
 def render_accounts_script(users: dict[str, list[str]]) -> str:
     """Shell script that reconciles guest accounts + `authorized_keys` to `users`.
 
     Ensures the shared `anci` group + service user (every app runs as them),
-    ensures one account per user (passwordless sudo, `authorized_keys` from the
-    conf), and revokes anyone left in the group who is no longer in the desired
-    set.
+    grants each listed user access, and revokes anyone left in the group who
+    isn't listed. An adopted box's bootstrap runs it; converge does the same
+    per user (see anci/inspect/user.py).
     """
     lines = ["set -e", *ANCI_ACCOUNT_CMDS]
-    for name, keys in users.items():
-        n = _sh(name)
-        lines.append(
-            f"id -u {n} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash {n}"
-        )
-        lines.append(f"usermod -aG {ANCI_GROUP} {n}")
-        lines.append(f"echo {_sh(f'{name} ALL=(ALL) NOPASSWD:ALL')} > /etc/sudoers.d/anci-{n}")
-        lines.append(f"chmod 440 /etc/sudoers.d/anci-{n}")
-        lines.append(f"install -d -o {n} -g {n} -m 700 /home/{n}/.ssh")
-        lines.append(f": > /home/{n}/.ssh/authorized_keys")
-        for key in keys:
-            lines.append(f"echo {_sh(key)} >> /home/{n}/.ssh/authorized_keys")
-        lines.append(f"chmod 600 /home/{n}/.ssh/authorized_keys")
-        lines.append(f"chown {n}:{n} /home/{n}/.ssh/authorized_keys")
-    # revoke stale group members (future-only revocation; accounts are kept)
-    lines.append("for u in $(getent group %s | cut -d: -f4 | tr ',' ' '); do"
-                 % ANCI_GROUP)
+    lines += [grant_script(name, keys) for name, keys in users.items()]
+    # revoke stale group members
+    lines.append("for u in $(getent group %s | cut -d: -f4 | tr ',' ' '); do" % ANCI_GROUP)
     lines.append("  case \" $u \" in")
     for name in users:
         lines.append(f"    *\" {name} \"*) ;;")
     lines.append("    *) gpasswd -d \"$u\" %s >/dev/null 2>&1 || true; "
-                 "rm -f /home/\"$u\"/.ssh/authorized_keys ;;" % ANCI_GROUP)
+                 "rm -f /etc/sudoers.d/anci-\"$u\" /home/\"$u\"/.ssh/authorized_keys ;;" % ANCI_GROUP)
     lines.append("  esac")
     lines.append("done")
     return "\n".join(lines) + "\n"
