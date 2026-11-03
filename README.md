@@ -12,40 +12,6 @@ curl -fsSL https://raw.githubusercontent.com/jazwa/ancisite/main/anci-install.sh
 
 To uninstall: `rm ~/.local/bin/anci` and `~/.cache/nce`.
 
-
-## Dev
-
-Install `anci` from your checkout as a command on your PATH, and run the tests:
-
-```
-uv tool install --editable .
-uv run python -m unittest discover -s tests -t .
-```
-
-
-## Building
-
-```
-make release      # -> dist/release/anci-<os>-<arch> + SHA256SUMS: what anci-install.sh downloads
-make build        # -> dist/anci (+ dist/anci.sha256): a zipapp, needs Python 3.12+ where you run it
-```
-
-## Shipping a release
-
-Tag the commit you want to release and push the tag:
-
-```
-git tag v1.2.3
-git push origin v1.2.3
-```
-
-If the workflow fails, commit the fix, then delete the tag and tag the new commit again:
-
-```
-git tag -d v1.2.3
-git push origin :refs/tags/v1.2.3
-```
-
 ## Using anci
 
 ### Setup
@@ -131,3 +97,37 @@ Replication backs up a db continuously to any S3-compatible storage using litest
 Each db's backup goes under `<env>/<db>` in the bucket. To restore, run `anci <env> regen <db>` (see
 [external-docs/regen.md](external-docs/regen.md)). To turn backups off on one env, put `replication = false` under
 `[db.<name>.env.<env>]`.
+
+## Dev
+
+Install `anci` from your checkout as a command on your PATH, and run the tests:
+
+```
+uv tool install --editable .
+uv run python -m unittest discover -s tests -t .
+```
+
+
+## Building
+
+```
+make release      # -> dist/release/anci-<os>-<arch> + SHA256SUMS: what anci-install.sh downloads
+make build        # -> dist/anci (+ dist/anci.sha256): a zipapp, needs Python 3.12+ where you run it
+```
+
+## Shipping a release
+
+Tag the commit you want to release and push the tag:
+
+```
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+If the workflow fails, commit the fix, then delete the tag and tag the new commit again:
+
+```
+git tag -d v1.2.3
+git push origin :refs/tags/v1.2.3
+```
+
