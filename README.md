@@ -16,7 +16,11 @@ To uninstall: `rm ~/.local/bin/anci` and `~/.cache/nce`.
 
 ### Setup
 
-Run `anci init` in your project to write a first `anci.toml`. 
+Run `anci init` in your project to write a first `anci.toml`. This will bootstrap a simplified
+anci config. It will create a "dev" env as part of this bootstrapping. You can think of envs
+as the actual machines that will run your anci project. Envs come in two modes: "full" and "adopt". For more info,
+see [modes.md](external-docs/modes.md).
+
 Then:
 
 ```
