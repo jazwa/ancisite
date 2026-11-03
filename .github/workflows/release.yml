@@ -17,10 +17,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
 
-      - name: Check the tag matches __version__
+      # The version in the repo is a placeholder: the tag is the real version.
+      # Write it into the source here (never committed) so the binary's
+      # `anci --version` reports it.
+      - name: Set the version from the tag
         run: |
-          want=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' anci/__init__.py)
-          [ "v$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME doesn't match __version__ $want"; exit 1; }
+          v="${GITHUB_REF_NAME#v}"
+          sed -i "s/^__version__ = .*/__version__ = \"$v\"/" anci/__init__.py
+          sed -i "s/^version = .*/version = \"$v\"/" pyproject.toml
+          grep -qx "__version__ = \"$v\"" anci/__init__.py || { echo "couldn't set __version__"; exit 1; }
+          grep -qx "version = \"$v\"" pyproject.toml || { echo "couldn't set version in pyproject.toml"; exit 1; }
 
       - run: make release
 

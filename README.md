@@ -32,19 +32,23 @@ make build        # -> dist/anci (+ dist/anci.sha256): a zipapp, needs Python 3.
 
 ## Shipping a release
 
-1. Set `__version__` in `anci/__init__.py` to the new version, e.g. `"1.2.3"`, and commit it.
-2. Tag that commit and push the tag:
+Tag the commit you want to release and push the tag:
 
-   ```
-   git tag v1.2.3
-   git push origin v1.2.3
-   ```
+```
+git tag v1.2.3
+git push origin v1.2.3
+```
 
-The `release` GitHub Actions workflow (`.github/workflows/release.yml`) then runs. It fails if the tag doesn't
-match `__version__`. Otherwise it runs `make release` and creates a GitHub release for the tag, with everything in
-`dist/release/` attached. `anci-install.sh` installs the latest release from there.
+The `release` GitHub Actions workflow
+(`.github/workflows/release.yml`) then runs. It writes the tag's version into `anci/__init__.py` and
+`pyproject.toml` in its own copy of the repo (nothing is committed), runs `make release`, and creates a GitHub
+release for the tag with everything in `dist/release/` attached. `anci-install.sh` installs the latest release from
+there.
 
-If the workflow fails, commit the fix, then delete the tag and repeat step 2 to tag the new commit:
+The version in the repo itself stays a placeholder, so a local `make release` or `make build` reports that
+placeholder, not a real release number.
+
+If the workflow fails, commit the fix, then delete the tag and tag the new commit again:
 
 ```
 git tag -d v1.2.3
