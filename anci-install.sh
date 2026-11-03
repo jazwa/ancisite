@@ -1,18 +1,18 @@
 #!/bin/sh
 # Install (or upgrade) anci: one self-contained binary, no Python needed.
 #
-#   curl -fsSL https://codeberg.org/zwa/ancisite/raw/branch/main/anci-install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/jazwa/ancisite/main/anci-install.sh | sh
 #
 # Settings (environment):
 #   ANCI_VERSION   release tag to install (default: the latest release)
 #   ANCI_BIN_DIR   where to put `anci` (default: ~/.local/bin)
-#   ANCI_BASE_URL  where release files are downloaded from (default: Codeberg;
+#   ANCI_BASE_URL  where release files are downloaded from (default: GitHub;
 #                  a test server serves <version>/<file> under it)
 set -eu
 
-REPO="zwa/ancisite"
+REPO="jazwa/ancisite"
 BIN_DIR="${ANCI_BIN_DIR:-$HOME/.local/bin}"
-BASE_URL="${ANCI_BASE_URL:-https://codeberg.org/$REPO/releases/download}"
+BASE_URL="${ANCI_BASE_URL:-https://github.com/$REPO/releases/download}"
 
 say() { printf '  %s\n' "$*"; }
 die() { printf 'anci-install: %s\n' "$*" >&2; exit 1; }
@@ -35,7 +35,7 @@ target="$os-$arch"
 # 2. which version: pinned, or the latest release
 version="${ANCI_VERSION:-}"
 if [ -z "$version" ]; then
-  version=$(curl -fsL "https://codeberg.org/api/v1/repos/$REPO/releases/latest" \
+  version=$(curl -fsL "https://api.github.com/repos/$REPO/releases/latest" \
             | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1) \
     || die "couldn't look up the latest release (set ANCI_VERSION to pick one)"
   [ -n "$version" ] || die "no release found (set ANCI_VERSION to pick one)"

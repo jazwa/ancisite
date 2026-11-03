@@ -1,0 +1,30 @@
+# Builds the release binaries and publishes them as a GitHub release.
+# Runs when a `vX.Y.Z` tag is pushed. `make release` builds all four
+# platforms from this one Linux runner, so no build matrix is needed.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # lets the job create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Check the tag matches __version__
+        run: |
+          want=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' anci/__init__.py)
+          [ "v$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME doesn't match __version__ $want"; exit 1; }
+
+      - run: make release
+
+      - name: Publish GitHub release
+        run: gh release create "$GITHUB_REF_NAME" dist/release/* --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

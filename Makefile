@@ -3,7 +3,7 @@
 #   make build   -> dist/anci (+ dist/anci.sha256)   a single-file zipapp
 #   make release -> dist/release/anci-<os>-<arch> (+ SHA256SUMS)
 #                   self-contained binaries (Python included): what
-#                   anci-install.sh downloads from a Codeberg release
+#                   anci-install.sh downloads from a GitHub release
 #   make test    -> the unittest suite
 #   make clean
 #
