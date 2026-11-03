@@ -14,7 +14,7 @@ from unittest import mock
 from anci.render import litestream, systemd
 from anci import box
 from anci.commands import dbs
-from anci import errors, ssh, ui
+from anci import errors, ssh
 from anci import secrets as secrets_mod
 from anci.conf import Conf, Db, Env, Exe, ExeOverride, Replication, User
 
@@ -176,24 +176,7 @@ class TestRenderers(unittest.TestCase):
             Db(name="x", migrations="/m", replication=Replication(bucket="b", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET"))), "b/x")
 
 
-class TestValidation(unittest.TestCase):
-    def test_bad_replication_rejected(self):
-        import tomllib
-
-        bad = """
-[db.x]
-migrations = '/m'
-replication = 's3://bucket'
-"""
-        from anci.conf import load
-
-        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
-            f.write(bad)
-            fd = f
-        fd.close()
-        with self.assertRaises(errors.ConfError):
-            load(fd.name)
-class TestMigrateVerify(unittest.TestCase):
+class TestMigrateCheckOnlyAfterChanges(unittest.TestCase):
     """The post-migrate check reads the db: only quick_check, only after a change."""
 
     def _cmds(self, td, migrations):
@@ -398,6 +381,20 @@ class TestMigrateChecksums(unittest.TestCase):
                 applied={"9999_gone": "deadbeef"}, baseline=True)
         delc.assert_called_once()
         self.assertEqual(delc.call_args[0][2], ["9999_gone"])
+
+
+class TestMigrateEnvGuard(unittest.TestCase):
+    def test_unknown_env_is_conf_error(self):
+        conf = Conf(
+            users={"jack": User(name="jack", ssh_pub_keys=["k"])},
+            envs={"dev": Env(name="dev", ip="127.0.0.1", access_users=["jack"],
+                             anci_version="0.0.1")},
+            exes={"app": Exe(name="app", source="./s",
+                             env_overrides={"dev": ExeOverride(env="dev")})},
+            dbs={"main-db": Db(name="main-db", migrations="./migrations/")},
+        )
+        with self.assertRaises(errors.ConfError):
+            dbs.migrate(conf, "main-db", "nope")
 
 
 if __name__ == "__main__":
@@ -701,23 +698,6 @@ class TestMigrationBundle(unittest.TestCase):
         delim = out.splitlines()[0].decode().split("<<'")[1].rstrip("'")
         self.assertNotIn(delim.encode() + b"\n", content)
         self.assertTrue(out.endswith(f"{delim}\n".encode()))
-
-
-class TestVersionPins(unittest.TestCase):
-    def test_every_entry_pins_a_hash_for_every_download(self):
-        from anci import versions
-        for v, e in versions.load().items():
-            self.assertTrue(e.litestream_sha256, v)
-            self.assertTrue(e.caddy_sha512, v)
-            self.assertRegex(e.sqlite_sha256 or "", r"^[0-9a-f]{64}$", v)
-            self.assertTrue(e.sqlite_url, v)
-            self.assertTrue(e.sops, v)
-            # one sops build per platform the anci CLI ships for
-            self.assertEqual(set(e.sops_builds), {"linux-x86_64", "linux-aarch64",
-                                                  "macos-aarch64", "macos-x86_64"}, v)
-            for url, sha256 in e.sops_builds.values():
-                self.assertRegex(sha256, r"^[0-9a-f]{64}$", v)
-                self.assertIn(f"v{e.sops}", url, v)
 
 
 class TestRegenTimestamp(unittest.TestCase):

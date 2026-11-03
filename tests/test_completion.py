@@ -24,8 +24,7 @@ vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 [env.prod]
 ip = '203.0.113.10'
 access-users = ['jack']
-mode = 'adopt'
-vm = { anci-version = '0.0.1' }
+vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 
 [exe.web]
 source = './bin/web'

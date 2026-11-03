@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests import record_addresses
 from anci import forward
 from anci.conf import load
 from anci.render.fwd import render_ruleset
@@ -25,8 +26,8 @@ vm = { vcpus = 2, mem = '1gb', disk = '20gb' }
 
 [env.prod]
 ip = '203.0.113.10'
-mode = 'adopt'
 access-users = ['jack']
+vm = { vcpus = 2, mem = '1gb', disk = '20gb' }
 
 [exe.app]
 source = './app'
@@ -43,7 +44,7 @@ schedule = 'daily'
 def _conf(td: str):
     p = Path(td) / "anci.toml"
     p.write_text(CONF)
-    return load(str(p))
+    return record_addresses(load(str(p)))
 
 
 class TestRuleset(unittest.TestCase):

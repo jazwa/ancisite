@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import shlex
 
-from . import errors, net, paths, ssh
+from . import box, errors, net, paths, ssh
 from .hashes import sha256_text
 from .render import caddy
 from .render.edge import (
@@ -54,7 +54,9 @@ def reconcile(conf: Conf, env_name: str, user: str) -> str | None:
     hv = Hypervisor(f"{user}@{env.ip}")
     bid = paths.box_id(conf)
     owner = f"{bid}/{env_name}"
-    vm_ip = net.env_ip(bid, env_name)
+    vm_ip = box.resolve_env_ip(conf, env_name)
+    if vm_ip is None:
+        raise errors.EnvError(f"{env_name} has no box yet", try_=f"anci {env_name} up")
     managed = (ROUTE_FILE, RULESET_FILE, APPLY_SCRIPT, HOOK_FILE)
     found = hv.probe({"route": f"cat {ROUTE_FILE}",
                       **{p: f"sha256sum {p} | cut -c1-64" for p in managed}})

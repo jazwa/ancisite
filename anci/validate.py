@@ -27,7 +27,7 @@ import re
 from typing import TYPE_CHECKING
 
 from .errors import ConfError
-from . import net, paths
+from . import paths
 from . import versions as versions_mod
 
 if TYPE_CHECKING:
@@ -123,8 +123,6 @@ def _check_rules(conf: "Conf") -> None:
                                 try_="give each user their own key")
 
     for env in conf.envs.values():
-        if env.adopted:
-            continue
         sizes = {"vcpus": env.vcpus, "mem": mem_to_mib(env.mem), "disk": disk_to_mib(env.disk)}
         for field, (low, high) in VM_LIMITS.items():
             unit = "" if field == "vcpus" else " MiB"
@@ -139,15 +137,7 @@ def _check_rules(conf: "Conf") -> None:
 def validate_conf(conf: "Conf") -> None:
     _check_rules(conf)
     known_versions = versions_mod.load()
-    boxes: dict[str, str] = {}
     for env in conf.envs.values():
-        address = env.ip if env.adopted else net.env_ip(paths.box_id(conf), env.name)
-        if address in boxes:
-            raise ConfError(
-                f"[env.{env.name}] and [env.{boxes[address]}] are the same box "
-                f"({address}) — one env is one box, so they can't share an address"
-            )
-        boxes[address] = env.name
         for u in env.access_users:
             if u not in conf.users:
                 raise ConfError(

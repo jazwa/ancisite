@@ -2,6 +2,11 @@
 
 Ancisite is a simple and opinionated Heroku-lite-like web platform. 
 
+The idea is provide a "good-enough" website runtime, with a heavy focus on developer ergonomics.
+
+You just need to provide a webserver binary (plus some config) and ancisite handle's the ancillary
+stuff like secrets and TLS. 
+
 **Docs: [external-docs/](external-docs/)** 
 
 ## Installing
@@ -18,8 +23,8 @@ To uninstall: `rm ~/.local/bin/anci` and `~/.cache/nce`.
 
 Run `anci init` in your project to write a first `anci.toml`. This will bootstrap a simplified
 anci config. It will create a "dev" env as part of this bootstrapping. You can think of envs
-as the actual machines that will run your anci project. Envs come in two modes: "full" and "adopt". For more info,
-see [modes.md](external-docs/modes.md).
+as the actual machines that will run your anci project. Each env is a VM that anci creates, on your machine or on
+a remote libvirt host. For more info, see [hosts.md](external-docs/hosts.md).
 
 Then:
 
@@ -45,9 +50,7 @@ ssh-pub-keys = 'ssh-ed25519 …'     # one key or a list
 [env.<name>]
 ip = '127.0.0.1'                   # ip of the actual machine running the anci vm.
 access-users = ['<user>']          # which [user.*] can deploy here
-mode = 'full'                      # optional: 'full' (anci runs the VM) or 'adopt' (an existing box)
-port = 22                          # optional: the box's sshd port
-vm = { vcpus = 2, mem = '2gb', disk = '20gb' }   # required for 'full'; 'adopt' takes only anci-version
+vm = { vcpus = 2, mem = '2gb', disk = '20gb' }   # required: the VM's config
 
 [exe.<name>]
 source = './target/…/web'          # required: the binary

@@ -26,16 +26,11 @@ Every key anci accepts. What the keys *do* at runtime is covered in [robots.md](
 
 ## `[env.<name>]`
 
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `ip` | string | | Required. `127.0.0.1` means a VM on this machine. |
-| `access-users` | string or list | | Required. Each must be a `[user.*]`. |
-| `mode` | `'full'` or `'adopt'` | `'full'` | `full`: anci runs the VM. `adopt`: a box someone else runs. |
-| `port` | int | `22` | The box's sshd port, 1–65535. |
-| `vm` | table | | Required for `full`. See below. |
-
-- Two envs can't be the same box.
-- An `adopt` env can't use `127.0.0.1`.
+| Key | Type | Notes |
+|---|---|---|
+| `ip` | string | Required. `127.0.0.1` means a VM on this machine; anything else is a remote libvirt host. |
+| `access-users` | string or list | Required. Each must be a `[user.*]`. |
+| `vm` | table | Required. See below. |
 
 ### `vm`
 
@@ -48,7 +43,7 @@ Usually written inline: `vm = { anci-version = '0.0.1', vcpus = 2, mem = '2gb', 
 | `mem` | `'512mb'`, `'4gb'`, or int MiB | At least 512 MiB. |
 | `disk` | `'20gb'` or int GiB | At least 4 GiB. |
 
-`vcpus`, `mem` and `disk` are required for `full` and not allowed for `adopt`.
+`vcpus`, `mem` and `disk` are required.
 
 ## `[exe.<name>]`
 

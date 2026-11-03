@@ -1,29 +1,23 @@
 """What an env's box looks like from outside: its kind, its address, the
 URLs and bind address its apps get, how to ssh into it, and the db paths
-injected into every app. Pure — derived from the conf alone.
+injected into every app. Derived from the conf, plus the address `up`
+recorded for the env's box (`anci.addresses`).
 """
 
 from __future__ import annotations
 
 import re
 
-from . import errors, layout, net, paths
+from . import addresses, errors, layout, paths
 from .conf import Conf, Env, allocate_ports, port_var
 
 
-def is_remote(env: Env) -> bool:
-    return env.adopted
-
-
 def is_remote_host(env: Env) -> bool:
-    return not env.adopted and env.ip != "127.0.0.1"
+    return env.ip != "127.0.0.1"
 
 
-def resolve_env_ip(conf: Conf, env_name: str) -> str:
-    env = conf.envs[env_name]
-    if env.adopted:
-        return env.ip
-    return net.env_ip(paths.box_id(conf), env.name)
+def resolve_env_ip(conf: Conf, env_name: str) -> str | None:
+    return addresses.recorded(conf, env_name)
 
 
 def localhost_name(conf: Conf) -> str:
@@ -48,7 +42,8 @@ def app_url(conf: Conf, exe_name: str, env_name: str,
         lport = (local_ports or {}).get(exe_name)
         if lport:
             return f"http://{localhost_name(conf)}:{lport}"
-        return f"http://{resolve_env_ip(conf, env_name)}:{port}"
+        ip = resolve_env_ip(conf, env_name)
+        return f"http://{ip}:{port}" if ip else f"http://{localhost_name(conf)}"
     if resolved.host:
         return f"https://{resolved.host}"
     return f"http://127.0.0.1:{port}"
@@ -71,8 +66,11 @@ def ssh_hint(conf: Conf, env_name: str, user: str) -> str | None:
     if user == "?" or user not in conf.envs[env_name].access_users:
         return None
     env = conf.envs[env_name]
+    ip = resolve_env_ip(conf, env_name)
+    if ip is None:
+        return None
     jump = f"-J {user}@{env.ip} " if is_remote_host(env) else ""
-    return f"ssh {jump}{user}@{resolve_env_ip(conf, env_name)}"
+    return f"ssh {jump}{user}@{ip}"
 
 
 def env_var_prefix(db_name: str) -> str:

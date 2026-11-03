@@ -14,8 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from anci import errors, ssh, ui
-from anci.box import ssh_hint
+from anci import errors, ui
+from anci import addresses
 from anci.conf import Env, load
 from anci import hypervisor as hv_mod
 from anci.providers import libvirt as lvm
@@ -138,9 +138,10 @@ class TestHypervisorTransport(unittest.TestCase):
         self.assertEqual(argv[-2:], ["jack@10.0.0.5", "sudo -n bash -c 'echo hi'"])
 
     def test_virsh_targets_the_system_daemon(self):
-        hv = FakeHypervisor()
-        hv.virsh("list", "--all")
-        self.assertEqual(hv.calls, [("list", "--all")])
+        hv = hv_mod.Hypervisor()
+        with mock.patch.object(hv, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+            hv.virsh("list", "--all")
+        run.assert_called_once_with("virsh --connect qemu:///system --quiet list --all")
 
     def test_sudo_password_prompt_is_explained(self):
         hv = hv_mod.Hypervisor("jack@10.0.0.5")
@@ -214,7 +215,7 @@ class TestDomState(unittest.TestCase):
         self.assertIn("libvirt daemon", str(cm.exception))
         with self.assertRaises(errors.EnvError) as cm:
             lvm._require_daemon(FakeHypervisor("jack@10.0.0.5", fail={"uri"}))
-        self.assertIn("mode = 'adopt'", cm.exception.try_)   # the likeliest misconfig
+        self.assertIn("has libvirt installed", cm.exception.try_)
 
 
 class TestStopDomain(unittest.TestCase):
@@ -260,11 +261,6 @@ class TestEnvDown(unittest.TestCase):
             lvm.env_down(_conf(), "dev")
         self.assertIn("nothing to stop", out.getvalue())
 
-    def test_adopt_env_is_refused(self):
-        conf = _conf("203.0.113.10")
-        conf.envs["dev"].mode = "adopt"
-        with self.assertRaises(errors.ConfError):
-            lvm.env_down(conf, "dev")
 
 
 class TestEnvUp(unittest.TestCase):
@@ -291,6 +287,17 @@ class TestEnvUp(unittest.TestCase):
         cloud = [i for s, i in hv.scripts if lvm.CLOUDINIT_DIR in s and i]
         self.assertEqual(len(cloud), 2)                     # user-data + network-config
         self.assertIn(f"/dev/tcp/{ip}/22", hv.scripts[-1][0])  # readiness, from the hypervisor
+
+    def test_up_records_the_address_it_picked(self):
+        conf, ip, out = self._up(FakeHypervisor(states=[None]), _conf("10.0.0.5"))
+        self.assertEqual(addresses.recorded(conf, "dev"), ip)
+        self.assertEqual(addresses.address_path(conf, "dev"),
+                         lvm.paths.project_root(conf) / "envs" / "dev" / "address")
+        self.assertIn("commit it", out)                    # a remote env's record is shared
+        # the next up reuses it, and says nothing new
+        conf, again, out = self._up(FakeHypervisor(states=["running"]), conf)
+        self.assertEqual(again, ip)
+        self.assertNotIn("commit it", out)
 
     def test_stopped_box_is_started(self):
         hv = FakeHypervisor(states=["shut off"])
@@ -414,15 +421,6 @@ class TestResize(unittest.TestCase):
 
 
 class TestVmReconcile(unittest.TestCase):
-    def test_adopt_is_a_noop(self):
-        conf = _conf("203.0.113.10")
-        conf.envs["dev"].mode = "adopt"
-        with mock.patch.object(lvm, "hypervisor") as hvf, \
-             mock.patch.object(lvm, "libvirt_hypervisor") as lhvf:
-            lvm.vm_reconcile(conf, "dev")
-        hvf.assert_not_called()
-        lhvf.assert_not_called()
-
     def test_resizes_through_libvirt_alone(self):
         # only virsh: no root scripts, so no sudo for a libvirt group member
         hv = FakeHypervisor(states=["running"], virsh_out={
@@ -454,55 +452,91 @@ class TestVmReconcile(unittest.TestCase):
 # registry
 
 
-class TestRegistry(unittest.TestCase):
-    def test_parses_descriptions(self):
-        hv = FakeHypervisor(virsh_out={
-            "list": "anci-proj-1-dev\nother\n",
-            "dumpxml": "<domain><description>anci box_id=proj-1 env=dev "
-                       "ip=192.168.122.50</description></domain>"})
-        self.assertEqual(lvm._registry(hv), {"192.168.122.50": "proj-1/dev"})
+_FAKE_VIRSH = """#!/bin/sh
+# argv: --connect qemu:///system --quiet <verb> [domain]
+echo "$*" >> "$(dirname "$0")/calls"
+case "$4" in
+  list) printf 'anci-proj-1-dev\\nother-vm\\nanci-proj-2-prod\\nanci-unstamped\\n' ;;
+  desc) case "$5" in
+          anci-proj-1-dev) echo 'anci box_id=proj-1 env=dev ip=192.168.122.50' ;;
+          anci-proj-2-prod) echo 'anci box_id=proj-2 env=prod ip=192.168.122.51' ;;
+          *) echo 'No description for domain' ;;
+        esac ;;
+  *) exit 1 ;;
+esac
+"""
 
-    def test_collision_is_a_hard_error(self):
-        with mock.patch.object(lvm, "_registry", return_value={"192.168.122.50": "other-9/dev"}):
-            with self.assertRaises(errors.EnvError) as cm:
-                lvm._claim_or_fail(FakeHypervisor(), _conf(), "dev", "192.168.122.50")
+
+class TestRegistry(unittest.TestCase):
+    """The host's anci boxes and their addresses, read in one round trip."""
+
+    def _run_for_real(self, virsh: str):
+        # the real script, run by bash against a stand-in `virsh` on the PATH
+        with tempfile.TemporaryDirectory() as td:
+            fake = Path(td) / "virsh"
+            fake.write_text(virsh)
+            fake.chmod(0o755)
+            hv = lvm.Hypervisor(sudo=False)
+            with mock.patch.dict("os.environ", {"PATH": f"{td}:/usr/bin:/bin"}):
+                registry = lvm._registry(hv)
+            calls = (Path(td) / "calls").read_text().splitlines() if (Path(td) / "calls").exists() else []
+        return registry, calls
+
+    def test_reads_every_anci_box_in_one_script(self):
+        registry, calls = self._run_for_real(_FAKE_VIRSH)
+        self.assertEqual(registry, {"192.168.122.50": "proj-1/dev", "192.168.122.51": "proj-2/prod"})
+        # other VMs aren't read; an anci box with no stamp is read but holds no address
+        self.assertFalse(any("other-vm" in c for c in calls))
+
+    def test_one_round_trip(self):
+        hv = FakeHypervisor()
+        with mock.patch.object(hv, "run", wraps=hv.run) as run:
+            lvm._registry(hv)
+        run.assert_called_once()
+
+    def test_unreadable_libvirt_holds_nothing(self):
+        registry, _ = self._run_for_real("#!/bin/sh\nexit 1\n")
+        self.assertEqual(registry, {})
+
+
+class TestAssignAddress(unittest.TestCase):
+    """`up` picks an address once: free on the host, then recorded."""
+
+    def _assign(self, conf, registry):
+        with mock.patch.object(lvm, "_registry", return_value=registry):
+            return lvm._assign_address(FakeHypervisor(), conf, "dev")
+
+    def test_a_new_box_takes_the_first_free_address(self):
+        taken = {"192.168.122.50": "other-1/dev", "192.168.122.52": "other-2/dev"}
+        self.assertEqual(self._assign(_conf(), taken), ("192.168.122.51", True))
+
+    def test_the_recorded_address_wins(self):
+        conf = _conf()
+        addresses.record(conf, "dev", "192.168.122.60")
+        self.assertEqual(self._assign(conf, {}), ("192.168.122.60", False))
+
+    def test_an_existing_box_keeps_its_stamped_address(self):
+        # a box made before addresses were recorded, or a record that wasn't committed
+        conf = _conf()
+        me = f"{lvm.paths.box_id(conf)}/dev"
+        self.assertEqual(self._assign(conf, {"192.168.122.77": me}), ("192.168.122.77", False))
+
+    def test_a_recorded_address_another_box_holds_is_refused(self):
+        conf = _conf()
+        addresses.record(conf, "dev", "192.168.122.50")
+        with self.assertRaises(errors.EnvError) as cm:
+            self._assign(conf, {"192.168.122.50": "other-9/dev"})
         self.assertIn("already claimed", str(cm.exception))
 
-    def test_own_claim_is_fine(self):
-        conf = _conf()
-        owner = f"{lvm.paths.box_id(conf)}/dev"
-        with mock.patch.object(lvm, "_registry", return_value={"192.168.122.50": owner}):
-            lvm._claim_or_fail(FakeHypervisor(), conf, "dev", "192.168.122.50")
+    def test_a_full_pool_is_an_error(self):
+        full = {ip: f"other-{i}/dev" for i, ip in enumerate(lvm.net.pool())}
+        with self.assertRaises(errors.EnvError) as cm:
+            self._assign(_conf(), full)
+        self.assertIn("no free address", str(cm.exception))
 
 
 # ---------------------------------------------------------------------------
 # a box on a remote host is reached through it
-
-
-class TestRemoteHostRouting(unittest.TestCase):
-    def _conn(self, conf):
-        with tempfile.TemporaryDirectory() as td, \
-             mock.patch.dict("os.environ", {"XDG_RUNTIME_DIR": td}), \
-             contextlib.redirect_stdout(io.StringIO()):
-            pin = Path(td) / "hostkey"   # an adopted box is only reachable once pinned
-            pin.write_text("k\n")
-            with mock.patch.object(ssh, "pin_path", return_value=pin):
-                return ssh.connect(conf, "dev", "jack")
-
-    def test_managed_remote_jumps_through_the_host(self):
-        conn = self._conn(_conf("10.0.0.5"))
-        self.assertIn("ProxyJump=jack@10.0.0.5", conn.opts)
-        self.assertTrue(conn.ip.startswith("192.168.122."))  # the VM, not the host
-
-    def test_local_and_adopt_do_not_jump(self):
-        ext = _conf("203.0.113.10")
-        ext.envs["dev"].mode = "adopt"
-        for conf in (_conf(), ext):
-            self.assertFalse(any(o.startswith("ProxyJump") for o in self._conn(conf).opts))
-
-    def test_ssh_hint_jumps(self):
-        self.assertTrue(ssh_hint(_conf("10.0.0.5"), "dev", "jack")
-                        .startswith("ssh -J jack@10.0.0.5 jack@192.168.122."))
 
 
 if __name__ == "__main__":
@@ -539,12 +573,6 @@ class TestRequireRunning(unittest.TestCase):
     def test_unreadable_state_leaves_it_to_ssh(self):
         self._check(1, err="error: authentication unavailable: no polkit agent\n")
 
-    def test_adopt_box_is_not_checked(self):
-        conf = _conf("203.0.113.10")
-        conf.envs["dev"].mode = "adopt"
-        with mock.patch.object(lvm.subprocess, "run") as run:
-            lvm.require_running(conf, "dev")
-        run.assert_not_called()
 
 
 class TestVmDifferences(unittest.TestCase):
@@ -558,7 +586,7 @@ class TestVmDifferences(unittest.TestCase):
 
     def _conf(self, **vm):
         conf = mock.Mock()
-        env = mock.Mock(adopted=False, ip="127.0.0.1", **{"vcpus": 2, "mem": "2gb", "disk": "20gb", **vm})
+        env = mock.Mock(ip="127.0.0.1", **{"vcpus": 2, "mem": "2gb", "disk": "20gb", **vm})
         env.name = "dev"
         conf.envs = {"dev": env}
         return conf

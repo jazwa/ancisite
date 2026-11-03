@@ -112,7 +112,7 @@ def _bridge(vm_ip: str) -> str:
 
 
 def desired(conf: Conf, env_name: str, grp: int) -> dict[str, tuple[str, str]]:
-    vm_ip = box.resolve_env_ip(conf, env_name)
+    vm_ip = _vm_ip(conf, env_name)
     forwards = [(BASE + grp * GROUP_SIZE + slot, APP_BASE + APP_STRIDE * slot)
                 for slot in range(GROUP_SIZE)] + [(CANARY_BASE + grp, 22)]
     return {
@@ -121,6 +121,13 @@ def desired(conf: Conf, env_name: str, grp: int) -> dict[str, tuple[str, str]]:
         APPLY_SCRIPT: (render_apply_script(), "0755"),
         HOOK_FILE: (render_hook(), "0755"),
     }
+
+
+def _vm_ip(conf: Conf, env_name: str) -> str:
+    vm_ip = box.resolve_env_ip(conf, env_name)
+    if vm_ip is None:
+        raise errors.EnvError(f"{env_name} has no box yet", try_=f"anci {env_name} up")
+    return vm_ip
 
 
 def _connects(host: str, port: int) -> bool:
@@ -141,7 +148,8 @@ def healthy(conf: Conf, env_name: str, fwd_dir: str = FWD_DIR) -> bool | None:
         return False
     if _connects("127.0.0.1", CANARY_BASE + grp):
         return True
-    return False if _connects(box.resolve_env_ip(conf, env_name), 22) else None
+    vm_ip = box.resolve_env_ip(conf, env_name)
+    return False if vm_ip and _connects(vm_ip, 22) else None
 
 
 def _have_nft() -> bool:

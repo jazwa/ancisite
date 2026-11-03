@@ -1,1 +1,1 @@
-"""Box providers: libvirt VMs (dev machine or remote host) + adopted boxes (`mode = 'adopt'`)."""
+"""Box providers: libvirt VMs, on the dev machine or a remote host."""

@@ -38,8 +38,7 @@ def _from_ssh(e) -> errors.Error:
             why="your key isn't authorized for that user on the box",
             try_="check the user exists and your key is in its authorized_keys — "
                  "re-run `anci <env> up` to reconcile (a box that's still "
-                 "booting may just need a moment); for an adopted box whose "
-                 "setup didn't finish: anci <env> up --user <login>",
+                 "booting may just need a moment)",
             debug=stderr,
         )
     if "could not get lock" in stderr.lower() or "dpkg frontend is locked" in stderr.lower():
@@ -119,33 +118,15 @@ def _info_names(ctx, param, incomplete):
 @click.command(help="Provision or boot this env's box (idempotent).")
 @click.option("--recreate", is_flag=True, help="Destroy the box and rebuild it from scratch.")
 @click.option("--force", is_flag=True, help="Skip the confirmation prompt.")
-@click.option("--user", help="Adopted box, first up only: the login for the setup (default: root).")
 @click.pass_obj
-def up(obj, recreate, force, user):
+def up(obj, recreate, force):
     from .inspect.run import converge
-    from .providers.adopt import up_adopt
     from .providers.libvirt import env_up
 
     conf, env_name = obj["conf"], obj["env"]
-    env = conf.envs[env_name]
     pipe = ui.Pipeline()
-    if env.adopted:
-        if recreate:
-            raise errors.ConfError(
-                f"anci didn't provision {env_name}'s box, so it can't recreate it",
-                why="it's mode = 'adopt' — someone else's machine",
-                try_="rebuild it with your provider, delete "
-                     f"envs/{env_name}/hostkey, then: anci {env_name} up",
-            )
-        up_adopt(conf, env_name, login_user=user, pipe=pipe)
-    else:
-        if user:
-            raise errors.ConfError(
-                "--user only applies to an adopted box's first up",
-                why=f"anci provisions {env_name}'s VM and creates your account on it",
-            )
-        if env_up(conf, env_name, recreate=recreate, force=force, pipe=pipe) is None:
-            return
+    if env_up(conf, env_name, recreate=recreate, force=force, pipe=pipe) is None:
+        return
     converge(conf, env_name, grow_disk=True, pipe=pipe)
     pipe.done()
 
@@ -267,12 +248,11 @@ def _check_env(conf: Conf, env_name: str, verb: str | None) -> None:
         return
     validate.validate_env(conf, env_name)
     env = conf.envs[env_name]
-    if sys.platform == "darwin" and not env.adopted and env.ip == "127.0.0.1":
+    if sys.platform == "darwin" and env.ip == "127.0.0.1":
         raise errors.ConfError(
             "a VM on your dev machine needs Linux",
             why="macOS can't run anci's x86_64 boxes natively",
-            try_=f"under [env.{env_name}], set ip to a remote Linux libvirt host, "
-                 "or mode = 'adopt' with a VPS",
+            try_=f"under [env.{env_name}], set ip to a remote Linux libvirt host",
         )
 
 

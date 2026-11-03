@@ -7,10 +7,9 @@ from pathlib import Path
 from unittest import mock
 
 from anci import box
-from anci import auth as _auth, errors, net, paths
+from anci import addresses, auth as _auth, errors, paths
 from anci.conf import ExeOverride
 from anci.commands import deploy as dep
-from anci.hashes import sha256_file
 from anci.conf import Exe, load
 
 CONF = """
@@ -25,8 +24,7 @@ vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 [env.prod]
 ip = '203.0.113.10'
 access-users = ['jack']
-mode = 'adopt'
-vm = { anci-version = '0.0.1' }
+vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 
 [exe.app]
 source = './bin/server'
@@ -37,29 +35,42 @@ source = './bin/server'
 """
 
 
+DEV_IP, PROD_IP = "192.168.122.50", "192.168.122.51"
+
+
 @contextmanager
 def conf_as(username: str):
-    """A loaded conf with releases.identify_user returning `username`."""
-    fd = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
-    fd.write(CONF)
-    fd.close()
-    conf = load(fd.name)
-    with mock.patch.object(_auth, "identify_user", return_value=username):
-        yield conf
+    """A loaded conf, its boxes' addresses recorded as `up` would, with
+    releases.identify_user returning `username`."""
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "anci.toml"
+        p.write_text(CONF)
+        conf = load(str(p))
+        addresses.record(conf, "dev", DEV_IP)
+        addresses.record(conf, "prod", PROD_IP)
+        with mock.patch.object(_auth, "identify_user", return_value=username):
+            yield conf
 
 
 class TestResolveEnvIp(unittest.TestCase):
-    def test_remote_ip_passthrough(self):
+    def test_reads_the_address_up_recorded(self):
+        # no discovery, no root, no libvirt connection: `up` recorded it
         with conf_as("jack") as conf:
-            self.assertEqual(box.resolve_env_ip(conf, "prod"), "203.0.113.10")
+            self.assertEqual(box.resolve_env_ip(conf, "dev"), DEV_IP)
+            self.assertEqual(box.resolve_env_ip(conf, "prod"), PROD_IP)
 
-    def test_localhost_is_deterministic_vm_ip(self):
-        # Static addressing: '127.0.0.1' resolves to the vm's assigned
-        # address with no discovery, no root, no libvirt connection.
+    def test_remote_address_is_committed_with_the_project(self):
         with conf_as("jack") as conf:
-            ip = box.resolve_env_ip(conf, "dev")
-            self.assertRegex(ip, r"^192\.168\.122\.\d+$")
-            self.assertEqual(ip, net.env_ip(paths.box_id(conf), "dev"))  # deterministic
+            self.assertEqual(addresses.address_path(conf, "prod"),
+                             paths.project_root(conf) / "envs" / "prod" / "address")
+            # a local box exists only on this machine: its address isn't in the repo
+            self.assertNotIn(str(paths.project_root(conf)), str(addresses.address_path(conf, "dev")))
+
+    def test_no_box_yet_means_no_address(self):
+        with conf_as("jack") as conf:
+            addresses.address_path(conf, "dev").unlink()
+            self.assertIsNone(box.resolve_env_ip(conf, "dev"))
+            self.assertIsNone(box.ssh_hint(conf, "dev", "jack"))
 
 
 class TestDeployGuards(unittest.TestCase):
@@ -142,18 +153,22 @@ class TestDeployAll(unittest.TestCase):
                 dep.deploy(conf, None, "dev")
         self.assertIn("no exes", str(cm.exception))
 
-class TestSha256(unittest.TestCase):
-    def test_known_vector(self):
-        with tempfile.NamedTemporaryFile("wb", delete=False) as f:
-            f.write(b"hello")
-            path = Path(f.name)
-        self.assertEqual(
-            sha256_file(path),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-        )
+class TestAppUrl(unittest.TestCase):
+    """Where each exe is reached, what it binds, and what status shows."""
 
+    def test_unknown_env_or_exe_is_a_conf_error(self):
+        with conf_as("jack") as conf:
+            for exe, env in (("app", "nope"), ("nope", "dev")):
+                with self.subTest(exe=exe, env=env), self.assertRaises(errors.ConfError):
+                    box.app_url(conf, exe, env)
 
-class TestUrl(unittest.TestCase):
+    def test_a_job_has_no_url(self):
+        with conf_as("jack") as conf:
+            conf.exes["app"].schedule = "daily"
+            with self.assertRaises(errors.ConfError) as cm:
+                box.app_url(conf, "app", "dev")
+        self.assertIn("no URL", str(cm.exception))
+
     def test_local_url_is_the_localhost_forward(self):
         with conf_as("jack") as conf:
             name = box.localhost_name(conf)
@@ -163,7 +178,7 @@ class TestUrl(unittest.TestCase):
                              f"http://{name}:20000")
             # no forward installed yet: the VM's address
             self.assertEqual(box.app_url(conf, "app", "dev"),
-                             f"http://{net.env_ip(paths.box_id(conf), 'dev')}:8000")
+                             f"http://{DEV_IP}:8000")
 
     def test_remote_url_is_the_host_or_internal(self):
         with conf_as("jack") as conf:
@@ -171,18 +186,38 @@ class TestUrl(unittest.TestCase):
             conf.exes["app"].env_overrides["prod"] = ExeOverride(env="prod", host="app.example.com")
             self.assertEqual(box.app_url(conf, "app", "prod"), "https://app.example.com")
 
+    def test_bind_address_rules(self):
+        with conf_as("jack") as conf:
+            # local: the localhost forward reaches the app at the VM's address
+            self.assertEqual(box.bind_address(conf, "app", "dev"), "0.0.0.0")
+            # remote: caddy fronts a host; without one the service is internal
+            self.assertEqual(box.bind_address(conf, "app", "prod"), "127.0.0.1")
+
+    def test_reachable_url(self):
+        with conf_as("jack") as conf:
+            self.assertEqual(
+                box.reachable_url(conf, "app", "dev", {"app": 20000}),
+                f"http://{box.localhost_name(conf)}:20000",
+            )
+            # remote + no host → nothing a user can open
+            self.assertIsNone(box.reachable_url(conf, "app", "prod"))
+            conf.exes["app"].env_overrides["prod"] = ExeOverride(env="prod", host="app.example.com")
+            self.assertEqual(
+                box.reachable_url(conf, "app", "prod"), "https://app.example.com"
+            )
+
 
 class TestSshHint(unittest.TestCase):
     def test_authorized_user_gets_ssh_command(self):
         with conf_as("jack") as conf:
             # a local env resolves to its assignable address, like every command
             self.assertEqual(box.ssh_hint(conf, "dev", "jack"),
-                             f"ssh jack@{net.env_ip(paths.box_id(conf), 'dev')}")
+                             f"ssh jack@{DEV_IP}")
 
-    def test_remote_env_uses_conf_ip(self):
+    def test_remote_env_jumps_through_its_host(self):
         with conf_as("jack") as conf:
             self.assertEqual(box.ssh_hint(conf, "prod", "jack"),
-                             "ssh jack@203.0.113.10")
+                             f"ssh -J jack@203.0.113.10 jack@{PROD_IP}")
 
     def test_unknown_key_gets_no_hint(self):
         with conf_as("?") as conf:
@@ -261,28 +296,6 @@ class TestDeployArchGuard(unittest.TestCase):
                 with self.assertRaises(errors.AppError) as cm:
                     dep.deploy(conf, "app", "dev")
             self.assertIn("arm64", str(cm.exception))
-
-
-class TestBindAndUrl(unittest.TestCase):
-    def test_bind_address_rules(self):
-        with conf_as("jack") as conf:
-            # local: the localhost forward reaches the app at the VM's address
-            self.assertEqual(box.bind_address(conf, "app", "dev"), "0.0.0.0")
-            # remote: caddy fronts a host; without one the service is internal
-            self.assertEqual(box.bind_address(conf, "app", "prod"), "127.0.0.1")
-
-    def test_reachable_url(self):
-        with conf_as("jack") as conf:
-            self.assertEqual(
-                box.reachable_url(conf, "app", "dev", {"app": 20000}),
-                f"http://{box.localhost_name(conf)}:20000",
-            )
-            # remote + no host → nothing a user can open
-            self.assertIsNone(box.reachable_url(conf, "app", "prod"))
-            conf.exes["app"].env_overrides["prod"] = ExeOverride(env="prod", host="app.example.com")
-            self.assertEqual(
-                box.reachable_url(conf, "app", "prod"), "https://app.example.com"
-            )
 
 
 class TestAppLogs(unittest.TestCase):

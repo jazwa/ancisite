@@ -20,8 +20,7 @@ from .errors import ConfError
 TOP_KEYS = {"anci-version", "user", "env", "exe", "db", "replication"}
 
 USER_KEYS = {"ssh-pub-keys"}
-ENV_KEYS = {"ip", "vm", "access-users", "port", "mode"}
-ENV_MODES = ("full", "adopt")
+ENV_KEYS = {"ip", "vm", "access-users"}
 VM_KEYS = {"anci-version", "vcpus", "mem", "disk"}
 EXE_KEYS = {"source", "args", "env-vars", "schedule", "static", "host", "env"}
 EXE_OVERRIDE_KEYS = {"source", "args", "env-vars", "schedule", "static", "host"}
@@ -46,15 +45,9 @@ class Env:
     ip: str
     access_users: list[str]
     anci_version: str
-    port: int = 22
     vcpus: int = 4
     mem: str = "4gb"
     disk: str = "20gb"
-    mode: str = "full"
-
-    @property
-    def adopted(self) -> bool:
-        return self.mode == "adopt"
 
     @property
     def local(self) -> bool:
@@ -286,22 +279,13 @@ def _parse_env(name: str, raw: dict, default_version: str | None) -> Env:
         raise ConfError(f"{ctx} must be a table")
     _only_keys(raw, ENV_KEYS, ctx)
 
-    mode = raw.get("mode", "full")
-    if mode not in ENV_MODES:
-        raise ConfError(
-            f"{ctx}: 'mode' must be 'full' (anci runs the VM) or 'adopt' (an existing box)")
-    adopted = mode == "adopt"
-
     vm_ctx = f"[env.{name}.vm]"
     vm_raw = raw.get("vm")
     if vm_raw is None:
-        if not adopted:
-            raise ConfError(
-                f"{ctx}: 'vm' is required for an anci-managed env, e.g. "
-                f"vm = {{ vcpus = 2, mem = '2gb', disk = '20gb' }} "
-                f"(or set mode = 'adopt' for a box someone else manages)"
-            )
-        vm_raw = {}
+        raise ConfError(
+            f"{ctx}: 'vm' is required, e.g. "
+            f"vm = {{ vcpus = 2, mem = '2gb', disk = '20gb' }}"
+        )
     if not isinstance(vm_raw, dict):
         raise ConfError(f"{ctx}: 'vm' must be a table of machine config")
     _only_keys(vm_raw, VM_KEYS, vm_ctx)
@@ -313,25 +297,14 @@ def _parse_env(name: str, raw: dict, default_version: str | None) -> Env:
             f"(set it at the top level or here)"
         )
 
-    explicit = frozenset(k for k in ("vcpus", "mem", "disk") if k in vm_raw)
-    if adopted and explicit:
-        raise ConfError(
-            f"{vm_ctx}: mode = 'adopt' — vcpus/mem/disk don't apply (remove them)"
-        )
-
-    port = raw.get("port", 22)
-    if isinstance(port, bool) or not isinstance(port, int) or not (1 <= port <= 65535):
-        raise ConfError(f"{ctx}: 'port' must be an integer in 1..65535")
     common = dict(name=name, ip=_str(raw, "ip", ctx),
                   access_users=_str_list(raw, "access-users", ctx),
-                  anci_version=anci_version, port=port, mode=mode)
-    if adopted:
-        return Env(**common)
+                  anci_version=anci_version)
 
     missing = [k for k in ("vcpus", "mem", "disk") if k not in vm_raw]
     if missing:
         raise ConfError(
-            f"{vm_ctx}: '{missing[0]}' is required for an anci-managed env "
+            f"{vm_ctx}: '{missing[0]}' is required "
             f"(vcpus/mem/disk size the box)"
         )
     vcpus = _int(vm_raw, "vcpus", vm_ctx)
@@ -579,12 +552,6 @@ def _validate(conf: Conf) -> None:
         raise ConfError("conf must define at least one [env.<name>]")
 
     for env in conf.envs.values():
-        if env.adopted and env.ip == "127.0.0.1":
-            raise ConfError(
-                f"[env.{env.name}]: mode = 'adopt' needs the box's address, not 127.0.0.1",
-                why="anci would bootstrap your own machine (accounts, sudoers) as the box",
-                try_="set ip to the box's address, or drop 'mode' for a VM on this dev machine",
-            )
         hosts: dict[str, str] = {}
         for exe in conf.exes.values():
             resolved = exe.resolve_for(env.name)

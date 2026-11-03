@@ -1,7 +1,6 @@
 import io
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
 from unittest import mock
 
 from anci import errors, ui
@@ -89,28 +88,17 @@ class TestStepTimers(unittest.TestCase):
     def tearDown(self):
         ui.set_ansi(False)
 
-    def _run(self, clock) -> str:
-        buf = io.StringIO()
-        with redirect_stdout(buf), mock.patch.object(ui.time, "monotonic", side_effect=clock):
-            step = ui.Step("uploading app")
-            step.done("2.1 MB")
-        return buf.getvalue()
-
-    def test_done_shows_elapsed_right(self):
-        out = self._run([0.0, 2.3])
-        self.assertIn("✓ uploading app  2.1 MB  2.3s", out)
-
-    def test_skip_shows_elapsed(self):
-        buf = io.StringIO()
-        with redirect_stdout(buf), mock.patch.object(ui.time, "monotonic", side_effect=[0.0, 0.4]):
-            ui.Step("reconciling").skip("clean")
-        self.assertIn("– reconciling  clean  0.4s", buf.getvalue())
-
-    def test_fail_shows_elapsed(self):
-        buf = io.StringIO()
-        with redirect_stdout(buf), mock.patch.object(ui.time, "monotonic", side_effect=[0.0, 0.2]):
-            ui.Step("restarting").fail()
-        self.assertIn("✗ restarting  0.2s", buf.getvalue())
+    def test_done_skip_and_fail_show_elapsed(self):
+        for label, end, elapsed, line in (
+            ("uploading app", lambda s: s.done("2.1 MB"), 2.3, "✓ uploading app  2.1 MB  2.3s"),
+            ("reconciling", lambda s: s.skip("clean"), 0.4, "– reconciling  clean  0.4s"),
+            ("restarting", lambda s: s.fail(), 0.2, "✗ restarting  0.2s"),
+        ):
+            buf = io.StringIO()
+            with self.subTest(label=label), redirect_stdout(buf), \
+                 mock.patch.object(ui.time, "monotonic", side_effect=[0.0, elapsed]):
+                end(ui.Step(label))
+            self.assertIn(line, buf.getvalue())
 
 
 class TestTable(unittest.TestCase):
@@ -120,6 +108,17 @@ class TestTable(unittest.TestCase):
         self.assertIn("http://x:8000", out)
         lines = out.splitlines()
         self.assertEqual(len(set(len(l) for l in lines)), 1)  # box edges align
+
+    def test_color_codes_dont_break_the_alignment(self):
+        ui.set_ansi(True)
+        try:
+            table = ui.table(
+                ["exe", "state"], [["app", ui.green("serving")], ["web", "down"]]
+            )
+        finally:
+            ui.set_ansi(False)
+        widths = {len(ui._ANSI_RE.sub("", line)) for line in table.splitlines()}
+        self.assertEqual(len(widths), 1, f"ragged table:\n{table}")
 
 
 class TestConfirm(unittest.TestCase):

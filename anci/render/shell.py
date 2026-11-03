@@ -54,28 +54,6 @@ def revoke_script(name: str) -> str:
     ])
 
 
-def render_accounts_script(users: dict[str, list[str]]) -> str:
-    lines = ["set -e", *ANCI_ACCOUNT_CMDS]
-    lines += [grant_script(name, keys) for name, keys in users.items()]
-    lines.append("for u in $(getent group %s | cut -d: -f4 | tr ',' ' '); do" % ANCI_GROUP)
-    lines.append("  case \" $u \" in")
-    for name in users:
-        lines.append(f"    *\" {name} \"*) ;;")
-    lines.append("    *) gpasswd -d \"$u\" %s >/dev/null 2>&1 || true; "
-                 "rm -f /etc/sudoers.d/anci-\"$u\" /home/\"$u\"/.ssh/authorized_keys ;;" % ANCI_GROUP)
-    lines.append("  esac")
-    lines.append("done")
-    return "\n".join(lines) + "\n"
-
-
-def render_bootstrap_script() -> str:
-    return (
-        "set -e\n"
-        + "\n".join(layout_commands())
-        + "\n"
-    )
-
-
 def layout_commands() -> tuple[str, ...]:
     return (
         f"install -d -o root -g {ANCI_GROUP} -m {layout.SHARED_MODE} {' '.join(layout.SHARED_DIRS)}",

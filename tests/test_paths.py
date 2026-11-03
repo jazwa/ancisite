@@ -25,20 +25,18 @@ def _conf(directory: str):
 
 
 class TestBoxId(unittest.TestCase):
-    def test_name_and_hash_shape(self):
-        with tempfile.TemporaryDirectory() as td:
-            bid = paths.box_id(_conf(td))
-        self.assertRegex(bid, r"^[a-z0-9-]+-[0-9a-f]{6}$")
-
-    def test_stable_for_the_same_project(self):
-        with tempfile.TemporaryDirectory() as td:
-            self.assertEqual(paths.box_id(_conf(td)), paths.box_id(_conf(td)))
-
-    def test_differs_across_projects(self):
-        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
-            self.assertNotEqual(paths.box_id(_conf(a)), paths.box_id(_conf(b)))
-
-    def test_uses_the_project_directory_name(self):
+    def test_project_name_then_a_hash(self):
         with tempfile.TemporaryDirectory(prefix="myproj-") as td:
             bid = paths.box_id(_conf(td))
-        self.assertTrue(bid.startswith("myproj-"))
+        self.assertRegex(bid, r"^myproj-[a-z0-9-]*-[0-9a-f]{6}$")
+
+    def test_stable_for_a_project_and_different_across_projects(self):
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            self.assertEqual(paths.box_id(_conf(a)), paths.box_id(_conf(a)))
+            self.assertNotEqual(paths.box_id(_conf(a)), paths.box_id(_conf(b)))
+
+
+class TestPathAnchoring(unittest.TestCase):
+    def test_artifacts_anchor_on_the_conf_dir_not_cwd(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertEqual(paths.artifacts_dir(_conf(td)), Path(td) / ".artifact")

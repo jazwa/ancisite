@@ -2,8 +2,8 @@ import unittest
 from unittest import mock
 
 from anci import validate
-from anci.conf import ConfError, allocate_ports, load
-from anci.conf import mem_to_kib, disk_to_qemu
+from anci.conf import Conf, ConfError, Env, Exe, ExeOverride, allocate_ports, load
+from anci.conf import mem_to_kib, mem_to_mib, disk_to_qemu
 
 VALID = """
 [user.jack]
@@ -20,8 +20,7 @@ vm = { anci-version = '0.0.1', vcpus = 2, mem = '2gb', disk = '20gb' }
 [env.prod]
 ip = '203.0.113.10'
 access-users = ['jack']
-mode = 'adopt'
-vm = { anci-version = '0.0.1' }
+vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 
 [exe.app]
 source = './bin/server'
@@ -39,7 +38,6 @@ source = './bin/worker'
 [exe.worker.env.dev]
 """
 
-from pathlib import Path
 import tempfile
 
 
@@ -91,7 +89,21 @@ class TestLoadValid(unittest.TestCase):
         self.assertEqual(len(users["alice"]), 2)  # alice has two keys
         self.assertEqual(len(users["jack"]), 1)
 
-    def test_port_allocation_deterministic(self):
+
+
+class TestPorts(unittest.TestCase):
+    """allocate_ports: each env's services get 8000, 8010, … — jobs get none."""
+
+    def _conf(self, *exes: tuple[str, str | None]) -> Conf:
+        return Conf(
+            users={},
+            envs={"dev": Env(name="dev", ip="127.0.0.1", access_users=[], anci_version="0.0.1")},
+            exes={name: Exe(name=name, source="./s", schedule=schedule,
+                            env_overrides={"dev": ExeOverride(env="dev")})
+                  for name, schedule in exes},
+        )
+
+    def test_deterministic_and_per_env(self):
         conf = load_str(VALID)
         ports = allocate_ports(conf)
         # each env is its own box, so ports restart per env
@@ -100,54 +112,31 @@ class TestLoadValid(unittest.TestCase):
         self.assertEqual(ports[("app", "prod")], 8000)
         self.assertEqual(allocate_ports(conf), ports)
 
+    def test_ports_skip_jobs_without_shifting_services(self):
+        ports = allocate_ports(self._conf(("app", None), ("cleanup", "daily"), ("web", None)))
+        self.assertEqual(ports[("app", "dev")], 8000)
+        self.assertEqual(ports[("web", "dev")], 8010)  # the job consumed no slot
+        self.assertNotIn(("cleanup", "dev"), ports)
 
-PORTED = """
-[user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
-
-[env.prod]
-ip = '203.0.113.10'
-access-users = ['jack']
-port = 2222
-mode = 'adopt'
-vm = { anci-version = '0.0.1' }
-
-[exe.app]
-source = './x'
-
-[exe.app.env.prod]
-"""
-
-
-class TestEnvPort(unittest.TestCase):
-    def test_default_is_22(self):
-        self.assertEqual(load_str(VALID).envs["dev"].port, 22)
-
-    def test_custom_port_parses(self):
-        self.assertEqual(load_str(PORTED).envs["prod"].port, 2222)
-
-    def test_out_of_range_or_nonint_rejected(self):
-        for bad in ("port = 0", "port = 70000", "port = 'x'"):
-            with self.assertRaises(ConfError):
-                load_str(PORTED.replace("port = 2222", bad))
+    def test_ten_services_per_env_fit_and_eleven_dont(self):
+        ten = allocate_ports(self._conf(*((f"x{i}", None) for i in range(10))))
+        self.assertEqual(len(set(ten.values())), 10)
+        with self.assertRaises(ConfError):
+            allocate_ports(self._conf(*((f"x{i}", None) for i in range(11))))
 
 
 class TestSizes(unittest.TestCase):
     def test_mem(self):
-        self.assertEqual(mem_to_kib("4gb"), 4 * 1024 * 1024)
-        self.assertEqual(mem_to_kib("512mb"), 512 * 1024)
-        # a bare integer is MiB everywhere (virt-install and the resize plan agree)
-        self.assertEqual(mem_to_kib(2048), 2048 * 1024)
-
-    def test_mem_to_mib_virt_install_units(self):
-        # regression: virt-install --memory is MiB. Passing KiB here once made
+        # regression: virt-install --memory is MiB. Passing KiB there once made
         # anci request a TiB of guest RAM (instant "Cannot allocate memory").
-        from anci.conf import mem_to_mib
-
-        self.assertEqual(mem_to_mib("1gb"), 1024)
-        self.assertEqual(mem_to_mib("2gb"), 2048)
-        self.assertEqual(mem_to_mib("512mb"), 512)
-        self.assertEqual(mem_to_mib(2048), 2048)
+        # A bare integer is MiB everywhere (virt-install and the resize plan agree).
+        for mem, mib in (("1gb", 1024), ("4gb", 4096), ("512mb", 512), (2048, 2048)):
+            with self.subTest(mem=mem):
+                self.assertEqual(mem_to_mib(mem), mib)
+                self.assertEqual(mem_to_kib(mem), mib * 1024)
+        with self.assertRaises(ConfError) as cm:
+            load_str(VALID.replace("mem = '2gb'", "mem = '2 bananas'"))
+        self.assertIn("invalid mem", str(cm.exception))
 
     def test_disk(self):
         self.assertEqual(disk_to_qemu("20gb"), "20G")
@@ -169,13 +158,20 @@ class TestValidation(unittest.TestCase):
         self.assert_conf_error(VALID + '\n[exe."a\\nb"]\nsource = "./x"\n', "control character")
 
     def test_reserved_names_are_refused_for_every_kind(self):
-        self.assert_conf_error(VALID.replace("[user.alice]", "[user.anci]")
-                               .replace("'jack', 'alice'", "'jack', 'anci'"), "reserved")
-        self.assert_conf_error(VALID.replace("[user.alice]", "[user.root]")
-                               .replace("'jack', 'alice'", "'jack', 'root'"), "reserved")
-        self.assert_conf_error(VALID + "\n[db.caddy]\nmigrations = './m'\n", "reserved")
-        for name in ("ssh", "sshd", "networking", "systemd-networkd"):
-            self.assert_conf_error(VALID + f"\n[exe.{name}]\nsource = './x'\n", "reserved")
+        def user(n):
+            return VALID.replace("[user.alice]", f"[user.{n}]").replace("'jack', 'alice'", f"'jack', '{n}'")
+
+        cases = [("user", user("anci")), ("user", user("root")),
+                 ("db", VALID + "\n[db.caddy]\nmigrations = './m'\n"),
+                 # `init` is an anci command, so it can't also be an env name
+                 ("env", VALID.replace("[env.dev]", "[env.init]").replace("[exe.app.env.dev]", "[exe.app.env.init]")
+                                .replace("[exe.worker.env.dev]", "[exe.worker.env.init]"))]
+        # anci's own units (`<exe>.service` would clash) and the box's system services
+        cases += [("exe", VALID + f"\n[exe.{n}]\nsource = './x'\n")
+                  for n in ("caddy", "litestream", "ssh", "sshd", "networking", "systemd-networkd")]
+        for kind, text in cases:
+            with self.subTest(kind=kind):
+                self.assert_conf_error(text, "reserved")
 
     def test_env_vars_need_valid_names_outside_anci_s(self):
         for key, fragment in (("ANCI_PORT", "is anci's"), ("anci_x", "is anci's"),
@@ -236,7 +232,6 @@ sync-interval = '5s'
         self.assertEqual(r.retention, "720h")
         self.assertEqual(r.sync_interval, "5s")           # per-db override wins
         self.assertIsNone(r.path)                         # defaults to the db name later
-        self.assertIsNone(r.path)                         # defaults to the db name later
         plain = load_str(VALID + "\n[db.plain]\nmigrations = './m'\n")
         self.assertIsNone(plain.dbs["plain"].replication)  # no subtable = off
 
@@ -249,10 +244,25 @@ sync-interval = '5s'
             ("path = '/abs'\n", "relative key prefix"),
             ("path = 'a/../b'\n", "relative key prefix"),
             ("path = 'shared'\n", "replicate to the same place"),   # dev and prod collide
+            ("access-key-env = '1BAD'\n", "isn't a valid env var name"),
+            ("retention = '30 days'\n", "must be a Go duration"),
+            ("region = ''\n", "'region' must be a non-empty string"),
+            ("url = 's3://b/x'\n", "unknown key(s)"),
         ):
-            self.assert_conf_error(VALID + repl + extra, fragment)
-        self.assert_conf_error(VALID + "\n[db.d]\nmigrations = './m'\n[db.d.replication]\n",
-                               "[db.d.replication]: 'bucket' is required")
+            with self.subTest(extra=extra):
+                self.assert_conf_error(VALID + repl + extra, fragment)
+
+    def test_replication_required_keys(self):
+        base = VALID + "\n[db.d]\nmigrations = './m'\n[db.d.replication]\n"
+        for extra, missing in (
+            ("sync-interval = '1s'\n", "bucket"),
+            ("bucket = 'b'\n", "endpoint"),
+            ("bucket = 'b'\nendpoint = 'https://s3.example.com'\n", "access-key-env"),
+            ("bucket = 'b'\nendpoint = 'https://s3.example.com'\naccess-key-env = 'K'\n",
+             "secret-key-env"),
+        ):
+            with self.subTest(missing=missing):
+                self.assert_conf_error(base + extra, f"[db.d.replication]: '{missing}' is required")
 
     def test_replication_per_env(self):
         conf = load_str(VALID + """
@@ -319,46 +329,6 @@ region = 'eu-west-1'
                     "replication = 'litestream:s3://bucket/db'",
             "'replication' must be a table")
 
-    def test_replication_bucket_required(self):
-        self.assert_conf_error(
-            VALID + "\n[db.main-db]\nmigrations = './m'\n"
-                    "[db.main-db.replication]\nsync-interval = '1s'",
-            "'bucket' is required")
-
-    def test_replication_key_env_names_required(self):
-        base = (VALID + "\n[db.main-db]\nmigrations = './m'\n"
-                        "[db.main-db.replication]\nbucket = 'b'\n")
-        self.assert_conf_error(base, "'endpoint' is required")
-        base += "endpoint = 'https://s3.example.com'\n"
-        self.assert_conf_error(base, "'access-key-env' is required")
-        self.assert_conf_error(base + "access-key-env = 'K'\n", "'secret-key-env' is required")
-
-    def test_replication_bad_env_name_rejected(self):
-        self.assert_conf_error(
-            VALID + "\n[db.main-db]\nmigrations = './m'\n"
-                    "[db.main-db.replication]\nbucket = 'b'\n"
-                    "access-key-env = '1BAD'\nsecret-key-env = 'OK'",
-            "isn't a valid env var name")
-
-    def test_replication_bad_duration_rejected(self):
-        self.assert_conf_error(
-            VALID + "\n[db.main-db]\nmigrations = './m'\n"
-                    "[db.main-db.replication]\nbucket = 'b'\n"
-                    "retention = '30 days'",
-            "must be a Go duration")
-
-    def test_replication_bad_region_rejected(self):
-        self.assert_conf_error(
-            VALID + "\n[db.main-db]\nmigrations = './m'\n"
-                    "[db.main-db.replication]\nbucket = 'b'\nregion = ''",
-            "'region' must be a non-empty string")
-
-    def test_replication_unknown_key_rejected(self):
-        self.assert_conf_error(
-            VALID + "\n[db.main-db]\nmigrations = './m'\n"
-                    "[db.main-db.replication]\nbucket = 'b'\nurl = 's3://b/x'",
-            "unknown key(s)")
-
     def test_unknown_top_key(self):
         self.assert_conf_error(VALID + "\n[typo]\nx = 1", "unknown key(s)")
 
@@ -405,13 +375,6 @@ region = 'eu-west-1'
             "unknown key",
         )
 
-    def test_invalid_exe_name_rejected(self):
-        # the name becomes the systemd unit and the on-guest path
-        self.assert_conf_error(
-            VALID + '\n[exe."bad/name"]\nsource = "./x"',
-            "invalid exe name",
-        )
-
     def test_env_inline_map_misuse_mentions_env_vars(self):
         # A literal `env = { ... }` map alongside [exe.app.env.dev] is rejected
         # by TOML itself ("cannot declare twice") — which is exactly why app
@@ -432,47 +395,6 @@ env = { dev = 'oops' }
 """
         self.assert_conf_error(minimal, "env-vars")
 
-    def test_bad_mem(self):
-        self.assert_conf_error(VALID.replace("mem = '2gb'", "mem = '2 bananas'"), "invalid mem")
-
-    def test_remote_env_with_vcpus_errors(self):
-        # sizing is local-box-only; prod is remote
-        self.assert_conf_error(
-            VALID.replace(
-                "vm = { anci-version = '0.0.1' }",
-                "vm = { anci-version = '0.0.1', vcpus = 4 }",
-            ),
-            "vcpus/mem/disk",
-        )
-
-    def test_reserved_env_name_rejected(self):
-        # `init` is an anci command, so it can't also be an env name
-        minimal = """
-[env.init]
-ip = '127.0.0.1'
-access-users = ['jack']
-vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
-
-[user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
-"""
-        self.assert_conf_error(minimal, "reserved")
-
-    def test_reserved_exe_name_rejected(self):
-        # `caddy`/`litestream` are anci's own units, so `<exe>.service` would clash
-        for name in ("caddy", "litestream"):
-            self.assert_conf_error(
-                VALID + f"\n[exe.{name}]\nsource = './x'",
-                "reserved",
-            )
-
-    def test_two_envs_on_one_box_rejected(self):
-        dup = VALID + (
-            "\n[env.staging]\nip = '203.0.113.10'\naccess-users = ['jack']\n"
-            "mode = 'adopt'\nvm = { anci-version = '0.0.1' }\n"
-        )
-        self.assert_conf_error(dup, "same box")
-
     def test_missing_conf(self):
         with self.assertRaises(ConfError):
             load("/nonexistent/anci.toml")
@@ -485,7 +407,7 @@ ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa754
             load(path)
 
 
-class TestModeAndVersion(unittest.TestCase):
+class TestEnvAndVersion(unittest.TestCase):
     """`mode` (who manages the box) + top-level `anci-version`."""
 
     LOCAL = """
@@ -512,43 +434,34 @@ access-users = ['jack']
                 env="vm = { anci-version = '0.0.3', vcpus = 2, mem = '1gb', disk = '20gb' }"))
         self.assertEqual(conf.envs["dev"].anci_version, "0.0.3")
 
+    def test_unknown_anci_version_is_rejected_at_load(self):
+        # a typo fails fast, before anything touches a box
+        with self.assertRaises(ConfError) as cm:
+            load_str(self.LOCAL.format(env="vm = { anci-version = '9.9.9', vcpus = 2, mem = '1gb', disk = '20gb' }"))
+        self.assertIn("9.9.9", str(cm.exception))
+
     def test_anci_version_is_required(self):
         with self.assertRaises(ConfError):
             load_str(self.LOCAL.format(env="vm = { vcpus = 2, mem = '1gb', disk = '20gb' }"))
 
-    def test_managed_env_requires_vm(self):
+    def test_env_requires_vm(self):
         with self.assertRaises(ConfError):
             load_str(self.LOCAL.format(env=""))
 
-    def test_managed_env_requires_sizing(self):
+    def test_vm_requires_sizing(self):
         with self.assertRaises(ConfError):
             load_str(self.LOCAL.format(env="vm = { anci-version = '0.0.1' }"))
 
-    def test_adopt_env_makes_vm_optional(self):
-        conf = load_str("anci-version = '0.0.1'\n"
-                        + self.LOCAL.format(env="mode = 'adopt'")
-                        .replace("127.0.0.1", "203.0.113.10"))
-        self.assertTrue(conf.envs["dev"].adopted)
-
-    def test_adopt_env_rejects_sizing(self):
-        with self.assertRaises(ConfError):
-            load_str(self.LOCAL.format(env="mode = 'adopt'\nvm = { vcpus = 2 }")
-                     .replace("127.0.0.1", "203.0.113.10"))
-
-    def test_mode_defaults_to_full(self):
-        conf = load_str("anci-version = '0.0.1'\n" + self.LOCAL.format(
-            env="vm = { vcpus = 2, mem = '1gb', disk = '20gb' }"))
-        self.assertEqual(conf.envs["dev"].mode, "full")
-        self.assertFalse(conf.envs["dev"].adopted)
-
-    def test_unknown_mode_is_rejected(self):
-        with self.assertRaises(ConfError) as cm:
-            load_str(self.LOCAL.format(env="mode = 'banana'\nvm = { anci-version = '0.0.1' }"))
-        self.assertIn("'full'", str(cm.exception))
-        self.assertIn("'adopt'", str(cm.exception))
+    def test_mode_and_port_are_unknown_keys(self):
+        sized = "vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }"
+        for extra in ("mode = 'full'", "port = 2222"):
+            with self.subTest(extra=extra):
+                with self.assertRaises(ConfError) as cm:
+                    load_str(self.LOCAL.format(env=f"{extra}\n{sized}"))
+                self.assertIn("unknown key", str(cm.exception))
 
     def test_remote_managed_box_loads(self):
-        # a non-local ip + mode = full = a box anci manages on a remote host
+        # a non-local ip = a box anci manages on a remote host
         conf = load_str("""
 anci-version = '0.0.1'
 
@@ -562,14 +475,7 @@ vm = { vcpus = 4, mem = '8gb', disk = '40gb' }
 """)
         env = conf.envs["prod"]
         self.assertEqual(env.ip, "10.0.0.5")
-        self.assertFalse(env.adopted)
         self.assertEqual(env.vcpus, 4)
-
-    def test_adopt_localhost_is_rejected(self):
-        # would bootstrap the operator's own machine as the box
-        with self.assertRaises(ConfError) as cm:
-            load_str(self.LOCAL.format(env="mode = 'adopt'\nvm = { anci-version = '0.0.1' }"))
-        self.assertIn("127.0.0.1", str(cm.exception))
 
     def test_names_that_reach_the_box_are_validated(self):
         import json

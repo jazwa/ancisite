@@ -13,8 +13,7 @@ Pinning:
 - remote vms: the pin lives committed in the project repo
   (`envs/<env>/hostkey`), verified strictly on every connection. Missing pin on
   a box anci provisioned = first contact (accept-new records it; anci tells the
-  user to commit it). An adopted box is only pinned by its first `up`, once the
-  bootstrap succeeds; without the pin it isn't set up, and connecting is refused.
+  user to commit it).
   Mismatch = SSHError(unreachable=False, host_key=True) → auth-class error
   telling the user how to re-pin manually (delete the pin, reconnect).
 - BatchMode: anci never falls back to a password prompt; a refused key is an
@@ -31,7 +30,6 @@ import hashlib
 import os
 import shlex
 import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -123,7 +121,6 @@ class Conn:
     opts: list[str] = field(default_factory=list)
     user: str = SSH_USER
     port: int = 22
-    boots: bool = True
 
     def ssh_argv(self, remote_args: list[str]) -> list[str]:
         return ["ssh", "-p", str(self.port), *self.opts,
@@ -135,8 +132,11 @@ class Conn:
 
 def connect(conf, env_name: str, user: str) -> Conn:
     ip = box.resolve_env_ip(conf, env_name)
+    if ip is None:
+        raise SSHError(f"{env_name} has no box yet (no address recorded by `up`)",
+                       unreachable=True)
     env = conf.envs[env_name]
-    opts = [*_mux_opts(user, ip, env.port), "-o", "BatchMode=yes"]
+    opts = [*_mux_opts(user, ip, 22), "-o", "BatchMode=yes"]
     if box.is_remote_host(env):
         opts += ["-o", f"ProxyJump={user}@{env.ip}"]
 
@@ -147,12 +147,6 @@ def connect(conf, env_name: str, user: str) -> Conn:
         pin = pin_path(conf, env_name)
         if pin.is_file():
             checking = "yes"
-        elif env.adopted:
-            raise errors.EnvError(
-                f"{env_name} isn't set up",
-                why=f"there's no pinned host key in {pin.relative_to(project_root(conf))}",
-                try_=f"anci {env_name} up --user <login>",
-            )
         else:
             pin.parent.mkdir(parents=True, exist_ok=True)
             print(f"  {ui.yellow('⚠')} first contact with {ip}: "
@@ -160,65 +154,11 @@ def connect(conf, env_name: str, user: str) -> Conn:
             checking = "accept-new"
         opts += ["-o", "ConnectTimeout=5", "-o", f"UserKnownHostsFile={pin}",
                  "-o", f"StrictHostKeyChecking={checking}"]
-    return Conn(ip=ip, user=user, port=env.port, opts=opts, boots=not env.adopted)
+    return Conn(ip=ip, user=user, opts=opts)
 
 
 def pin_path(conf, env_name: str) -> Path:
     return project_root(conf) / "envs" / env_name / "hostkey"
-
-
-def env_trust(conf, env_name: str, *, stdin=None) -> list[str] | None:
-    if env_name not in conf.envs:
-        raise errors.ConfError(f"env '{env_name}' isn't in anci.toml")
-    if stdin is None and not sys.stdin.isatty():
-        raise errors.AuthError(
-            "re-pinning a box's identity needs a terminal",
-            why="trust decisions can't be made non-interactively",
-            try_="run this in your terminal, not from a script",
-        )
-
-    ip = box.resolve_env_ip(conf, env_name)
-    port = conf.envs[env_name].port
-    try:
-        p = subprocess.run(
-            ["ssh-keyscan", "-p", str(port), ip],
-            capture_output=True, text=True, timeout=30,
-        )
-    except FileNotFoundError as e:
-        raise _missing("ssh-keyscan") from e
-    keys = [
-        line.strip()
-        for line in p.stdout.splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
-    if not keys:
-        raise errors.EnvError(
-            f"couldn't reach {ip} to read its host key",
-            try_=f"is the box up? is port {port} reachable?",
-            debug=p.stderr.strip(),
-        )
-    try:
-        subprocess.run(["ssh-keygen", "-lf", "-"], input="\n".join(keys) + "\n", text=True)
-    except FileNotFoundError as e:
-        raise _missing("ssh-keygen") from e
-
-    if not ui.confirm(
-        "trusting this box's host key:",
-        [f"anci will bootstrap and manage {ip} over this identity",
-         "verify the fingerprints above against your provider's console"],
-        f"trust these keys for env '{env_name}'?",
-        stdin=stdin,
-    ):
-        print(f"  {ui.dim('aborted — nothing changed')}")
-        return None
-    return keys
-
-
-def write_pin(conf, env_name: str, keys: list[str]) -> Path:
-    pin = pin_path(conf, env_name)
-    pin.parent.mkdir(parents=True, exist_ok=True)
-    pin.write_text("\n".join(keys) + "\n")
-    return pin
 
 
 def run(conn: Conn, args: list[str], *, timeout: int = 120) -> Result:
@@ -320,8 +260,8 @@ def put_down(conn: Conn, remote: str, local: str, *, timeout: int = 600) -> None
     Path(local).write_bytes(p.stdout)
 
 
-def boot_race(conn: Conn, e: SSHError) -> bool:
-    return conn.boots and (e.auth or e.unreachable)
+def boot_race(e: SSHError) -> bool:
+    return e.auth or e.unreachable
 
 
 def wait_ready(conn: Conn, *, auth_timeout: int = 60, boot_timeout: int = 600) -> None:
@@ -331,7 +271,7 @@ def wait_ready(conn: Conn, *, auth_timeout: int = 60, boot_timeout: int = 600) -
             run(conn, ["true"], timeout=15)
             break
         except (SSHError, subprocess.TimeoutExpired) as e:
-            retryable = not isinstance(e, SSHError) or boot_race(conn, e)
+            retryable = not isinstance(e, SSHError) or boot_race(e)
             if not retryable or time.monotonic() >= deadline:
                 raise
             time.sleep(3)

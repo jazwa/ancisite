@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from anci import auth, errors, layout, ssh
+from tests import record_addresses
 from anci.commands import info as info_mod
 from anci.conf import Conf, Db, Env, Exe, ExeOverride, Replication, User
 
@@ -99,7 +100,7 @@ class TestInfo(unittest.TestCase):
              mock.patch.object(auth, "authorize", return_value="jack"), \
              mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
              mock.patch.object(info_mod, "_probe", return_value=res):
-            info_mod.info(make_conf(), "dev", **kw)
+            info_mod.info(record_addresses(make_conf()), "dev", **kw)
         return buf.getvalue()
 
     def test_renders_every_section_and_marks_a_shared_blob(self):

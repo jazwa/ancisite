@@ -81,7 +81,7 @@ def _blobs() -> Step:
 def always(ctx: ApplyContext, *, grow_disk: bool = False) -> list[Step]:
     from . import RESOURCES
     out = [_layout(), _gc(), *(s for r in RESOURCES for s in r.always(ctx))]
-    if grow_disk and not ctx.conf.envs[ctx.env_name].adopted:
+    if grow_disk:
         out.append(Step("box/grow-disk", _GROW))
     return out
 

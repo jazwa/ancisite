@@ -9,14 +9,14 @@ import contextlib
 import io
 import subprocess
 import tempfile
-import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
 from anci import auth
-from anci import inspect, layout, releases, ssh
+from tests import record_addresses
+from anci import inspect, layout, ssh
 from anci.commands import status
 from anci.conf import (
     Conf,
@@ -163,29 +163,16 @@ class TestBehind(unittest.TestCase):
     def _at(self, offset):
         return mock.patch.object(status.time, "time", return_value=REPLICA_EPOCH + offset)
 
-    def test_seconds(self):
-        with self._at(2):
-            self.assertEqual(status._behind(REPLICA_TS), "2s since last sync")
+    def test_how_long_since_the_last_sync(self):
+        for offset, text in ((2, "2s"), (-5, "0s"),        # a clock behind the replica is caught up
+                             (250, "4m"), (8 * 60, "8m")):
+            with self.subTest(offset=offset), self._at(offset):
+                self.assertEqual(status._behind(REPLICA_TS), f"{text} since last sync")
 
-    def test_clock_behind_replica_is_caught_up(self):
-        with self._at(-5):
-            self.assertEqual(status._behind(REPLICA_TS), "0s since last sync")
-
-    def test_minutes(self):
-        with self._at(250):
-            self.assertEqual(status._behind(REPLICA_TS), "4m since last sync")
-
-    def test_grows_with_the_clock(self):
-        with self._at(8 * 60):
-            self.assertEqual(status._behind(REPLICA_TS), "8m since last sync")
-
-    def test_no_replica_timestamp(self):
-        self.assertIsNone(status._behind(None))
-        self.assertIsNone(status._behind(""))
-        self.assertIsNone(status._behind("-"))
-
-    def test_unparseable_timestamp(self):
-        self.assertIsNone(status._behind("not-a-date"))
+    def test_no_usable_replica_timestamp(self):
+        for ts in (None, "", "-", "not-a-date"):
+            with self.subTest(ts=ts):
+                self.assertIsNone(status._behind(ts))
 
 class TestUrlColumn(unittest.TestCase):
     """The exe url is a report, not a conf promise — only when the port answers."""
@@ -218,7 +205,6 @@ class TestUrlColumn(unittest.TestCase):
         conf = make_conf()
         # swap dev for a remote env with no host: nothing publicly reachable
         conf.envs["dev"].ip = "203.0.113.10"
-        conf.envs["dev"].mode = "adopt"
         buf = io.StringIO()
         with mock.patch.object(auth, "identify_user", return_value="jack"), \
              mock.patch.object(ssh, "connect",
@@ -264,7 +250,7 @@ class TestStatusDbTable(unittest.TestCase):
         fd = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
         fd.write(CONF)
         fd.close()
-        return load(fd.name)
+        return record_addresses(load(fd.name))
 
     def _run(self, conf, found: dict, debug: bool = False,
              facts_raises: Exception | None = None) -> str:
@@ -501,6 +487,161 @@ class TestBoxStats(unittest.TestCase):
              contextlib.redirect_stdout(buf):
             status.status(make_conf(), "dev")
         self.assertNotIn("GB /", buf.getvalue())   # no numbers when the box is down
+
+
+class TestMechUnits(unittest.TestCase):
+    def _conf(self) -> Conf:
+        conf = Conf(
+            users={"jack": User(name="jack", ssh_pub_keys=["k"])},
+            # a remote env: there caddy is wanted only for a `host`
+            envs={"dev": Env(name="dev", ip="10.0.0.5", access_users=["jack"],
+                             anci_version="0.0.1")},
+            exes={"app": Exe(name="app", source="./s",
+                             env_overrides={"dev": ExeOverride(env="dev", host="dev.example.com")})},
+            dbs={"main-db": Db(
+                name="main-db", migrations="./m/",
+                replication=Replication(bucket="backups", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET"),
+            )},
+            path=str(Path(tempfile.mkdtemp()) / "anci.toml"),
+        )
+        return record_addresses(conf)
+
+    def test_desired_mech_mirror_reconcile_conditions(self):
+        conf = self._conf()
+        self.assertEqual(
+            status._mech_units(conf, "dev"),
+            ["caddy.service", "litestream.service"],
+        )
+        # no replication, no host → both drop out
+        conf.dbs["main-db"].replication = None
+        conf.exes["app"].env_overrides["dev"].host = None
+        self.assertEqual(status._mech_units(conf, "dev"), [])
+
+    def test_reads_mech_facts(self):
+        found = {
+            "litestream.service active": ["active"],
+            "litestream.service enabled": ["enabled"],
+            "litestream.service installed": ["yes"],
+            "caddy.service active": ["inactive"],
+        }
+        parsed = status._read(observed(found), self._conf(), ["app"], "dev")
+        lit = parsed.mech["litestream.service"]
+        self.assertEqual((lit.active, lit.enabled, lit.installed), ("active", True, True))
+        cad = parsed.mech["caddy.service"]
+        self.assertEqual(cad.active, "inactive")
+        self.assertFalse(cad.installed)
+
+    def test_mech_check_states(self):
+        unit = "caddy.service"
+        running = status._mech_check(unit, status.MechState(active="active", enabled=True, installed=True))
+        self.assertIn("✓", running)
+        self.assertIn(f"{unit} — running", running)
+        self.assertNotIn("not enabled", running)
+        stopped = status._mech_check(unit, status.MechState(active="inactive", enabled=False, installed=True))
+        self.assertIn("✗", stopped)
+        self.assertIn(f"{unit} — stopped", stopped)
+        self.assertIn("· not enabled at boot", stopped)
+        missing = status._mech_check("litestream.service", status.MechState(active="inactive", enabled=False, installed=False))
+        self.assertIn("litestream.service — not installed", missing)
+        self.assertNotIn("not enabled", missing)   # no unit file → boot is moot
+        gap = status._mech_check(unit, None)
+        self.assertIn("—", gap)
+        self.assertIn(unit, gap)
+
+    def _status_output(self, conf, found: dict, debug: bool) -> str:
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with mock.patch.object(auth, "identify_user", return_value="jack"), \
+             mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
+             mock.patch.object(ssh, "facts", return_value=box_facts(found)), \
+             contextlib.redirect_stdout(buf):
+            status.status(conf, "dev", debug=debug)
+        return buf.getvalue()
+
+    def test_status_prints_mechanism_checklist(self):
+        conf = self._conf()
+        found = {
+            "app active": ["active"], "app port": ["open"],
+            "litestream.service active": ["active"],
+            "litestream.service enabled": ["enabled"],
+            "caddy.service active": ["active"],
+            "caddy.service enabled": ["enabled"],
+            "caddy.service installed": ["yes"],
+        }
+        text = self._status_output(conf, found, debug=False)
+        # litestream left the checklist — the db table's replication
+        # column speaks for it per-db (here: db never deployed → all dashes)
+        self.assertNotIn("litestream.service", text)
+        self.assertIn("main-db", text)
+        self.assertIn("caddy.service — running", text)
+        # the env HAS a host → caddy is real, no "not configured" note
+        self.assertNotIn("not configured", text)
+        # the ssh hint moved out from above the table into the checklist
+        self.assertIn("ssh with ssh -J jack@10.0.0.5 jack@", text)   # a remote hypervisor's box
+        self.assertNotIn("boot", text)   # no table header/columns
+        self.assertNotIn("systemd", text)  # no section header either
+
+    def test_unset_caddy_note_when_no_host(self):
+        conf = self._conf()
+        conf.exes["app"].env_overrides["dev"].host = None   # caddy drops out of the desired list
+        found = {
+            "app active": ["active"], "app port": ["open"],
+            "litestream.service active": ["active"],
+            "litestream.service enabled": ["enabled"],
+            "litestream.service installed": ["yes"],
+        }
+        text = self._status_output(conf, found, debug=False)
+        line = next(
+            ln for ln in text.splitlines() if "not configured" in ln
+        )
+        self.assertIn("✗", line)
+        self.assertIn("caddy.service — not configured (no host)", line)
+        self.assertNotIn("litestream.service", text)  # per-db, in the table
+
+    def test_unset_caddy_note_skipped_for_pure_jobs(self):
+        # nothing long-running → nothing to front → no note, no caddy
+        conf = self._conf()
+        conf.exes["app"].env_overrides["dev"].host = None
+        conf.exes["app"].schedule = "daily"
+        self.assertNotIn("not configured", self._status_output(conf, {}, debug=False))
+
+    def test_status_down_grays_the_checklist(self):
+        import contextlib
+        import io
+
+        conf = self._conf()
+        buf = io.StringIO()
+        with mock.patch.object(auth, "identify_user", return_value="jack"), \
+             mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
+             mock.patch.object(ssh, "facts",
+                               side_effect=ssh.SSHError("no route", unreachable=True)), \
+             contextlib.redirect_stdout(buf):
+            status.status(conf, "dev", debug=False)
+        text = buf.getvalue()
+        self.assertIn("box down", text)
+        self.assertIn("— caddy.service", text)
+        self.assertNotIn("litestream.service", text)  # per-db, in the table
+        self.assertIn("main-db", text)                # db row grayed too
+        self.assertNotIn("ssh with", text)            # no login hint for a down box
+
+class TestStatusReleases(unittest.TestCase):
+    def test_last_deploy_is_attributed_per_exe(self):
+        found = {"releases": [
+            'app\t{"ts":"2026-01-01T00:00:00Z","env":"dev","blob":"aaaa","source":"s","user":"jack"}',
+            'worker\t{"ts":"2026-02-02T00:00:00Z","env":"dev","blob":"bbbb","source":"s","user":"alice"}',
+        ]}
+        conf = Conf(
+            users={}, envs={"dev": Env(name="dev", ip="127.0.0.1", access_users=[],
+                                       anci_version="0.0.1")},
+            exes={n: Exe(name=n, source="./s") for n in ("app", "worker")},
+        )
+        parsed = status._read(observed(found), conf, ["app", "worker"], "dev")
+        self.assertEqual(status._latest_release(parsed.releases, "app", "dev")["user"], "jack")
+        self.assertEqual(
+            status._latest_release(parsed.releases, "worker", "dev")["user"], "alice"
+        )
 
 
 if __name__ == "__main__":

@@ -1,24 +1,21 @@
 import unittest
 
-from anci.render import litestream, shell
+from anci.render import shell
 from anci import layout
 
 
 class TestLayout(unittest.TestCase):
-    def test_shared_dirs_root_anci_2775(self):
+    def test_dir_owners_and_modes(self):
         script = shell.render_layout_script()
+        # shared: root:anci 2775, including /var/lib/anci itself (finding #4)
         self.assertIn(f"-o root -g {layout.ANCI_GROUP} -m 2775", script)
-        self.assertIn(layout.VAR_DIR, script)          # /var/lib/anci itself (finding #4)
+        self.assertIn(layout.VAR_DIR, script)
         self.assertIn(layout.BLOB_DIR, script)
-
-    def test_config_dirs_root_root_0755(self):
-        script = shell.render_layout_script()
+        # config: root:root 0755
         self.assertIn("-o root -g root -m 0755", script)
         for d in (layout.ETC_DIR, layout.UNITS_DIR, layout.CADDY_DIR):
             self.assertIn(d, script)
-
-    def test_log_dir_is_app_owned(self):
-        script = shell.render_layout_script()
+        # logs: owned by the app user
         self.assertIn(
             f"-o {layout.ANCI_USER} -g {layout.ANCI_GROUP} -m {layout.LOG_MODE} {layout.LOG_DIR}",
             script,

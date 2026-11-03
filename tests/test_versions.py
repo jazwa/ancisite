@@ -1,25 +1,7 @@
 import unittest
 
 from anci import versions as vmod
-from anci.conf import ConfError, load
 from anci.versions import VersionError
-
-VALID = """
-[env.dev]
-ip = '127.0.0.1'
-access-users = ['jack']
-vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
-
-[user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
-"""
-
-
-def write_conf(tmp, text):
-    p = tmp / "anci.toml"
-    p.write_text(text)
-    return p
-
 
 class TestVersions(unittest.TestCase):
     def test_bundled_versions_load(self):
@@ -34,6 +16,23 @@ class TestVersions(unittest.TestCase):
         with self.assertRaises(VersionError) as cm:
             vmod.get(entries, "9.9.9")
         self.assertIn("0.0.1", str(cm.exception))
+
+
+class TestVersionPins(unittest.TestCase):
+    def test_every_entry_pins_a_hash_for_every_download(self):
+        from anci import versions
+        for v, e in versions.load().items():
+            self.assertTrue(e.litestream_sha256, v)
+            self.assertTrue(e.caddy_sha512, v)
+            self.assertRegex(e.sqlite_sha256 or "", r"^[0-9a-f]{64}$", v)
+            self.assertTrue(e.sqlite_url, v)
+            self.assertTrue(e.sops, v)
+            # one sops build per platform the anci CLI ships for
+            self.assertEqual(set(e.sops_builds), {"linux-x86_64", "linux-aarch64",
+                                                  "macos-aarch64", "macos-x86_64"}, v)
+            for url, sha256 in e.sops_builds.values():
+                self.assertRegex(sha256, r"^[0-9a-f]{64}$", v)
+                self.assertIn(f"v{e.sops}", url, v)
 
 
 class TestSopsBuilds(unittest.TestCase):
@@ -99,30 +98,6 @@ class TestSopsBinary(unittest.TestCase):
              self.assertRaises(errors.EnvError) as cm:
             secrets.sops_binary(conf, "dev")
         self.assertIn("freebsd-x86_64", str(cm.exception))
-
-
-class TestVersionPinValidation(unittest.TestCase):
-    """The conf requires a vm anci-version that exists in the bundled
-    mapping — enforced at load time, so a typo fails fast."""
-
-    def test_conf_pin_is_a_string(self):
-        import tempfile
-        from pathlib import Path
-
-        with tempfile.TemporaryDirectory() as td:
-            p = write_conf(Path(td), VALID)
-            conf = load(p)
-            self.assertEqual(conf.envs["dev"].anci_version, "0.0.1")
-
-    def test_unknown_pin_is_rejected_at_load(self):
-        import tempfile
-        from pathlib import Path
-
-        with tempfile.TemporaryDirectory() as td:
-            bad = VALID.replace("'0.0.1'", "'9.9.9'")
-            with self.assertRaises(ConfError) as cm:
-                load(write_conf(Path(td), bad))
-            self.assertIn("9.9.9", str(cm.exception))
 
 
 if __name__ == "__main__":

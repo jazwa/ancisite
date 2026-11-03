@@ -15,6 +15,7 @@ from .box import is_remote_host
 from .conf import Conf
 
 SSH_PORT = 22
+VIRSH = "virsh --connect qemu:///system --quiet"
 
 
 @dataclass
@@ -74,7 +75,7 @@ class Hypervisor:
                                try_="re-run with --debug for the raw output", debug=err)
 
     def virsh(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        p = self.run("virsh --connect qemu:///system --quiet " + shlex.join(args))
+        p = self.run(f"{VIRSH} {shlex.join(args)}")
         if check and p.returncode != 0:
             raise errors.EnvError(
                 f"virsh {' '.join(args)} failed",

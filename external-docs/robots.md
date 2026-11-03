@@ -12,10 +12,9 @@ keys. No containers, no k8s, no managed services.
 
 ## Concepts
 
-- **box** — the machine an env runs on. Three kinds:
+- **box** — the VM an env runs on. Two kinds:
   - a VM on your dev machine (`ip = '127.0.0.1'`, `anci <env> up`);
-  - a VM on a remote libvirt host you own (`ip = '<host>'`, `anci <env> up`);
-  - someone else's box, e.g. a rented VPS (`mode = 'adopt'`, `anci <env> up`).
+  - a VM on a remote libvirt host you own (`ip = '<host>'`, `anci <env> up`).
 - **env** — a deployment target (`dev`, `prod`, …) = one box.
 - **exe** — your binary: an HTTP service, or a scheduled job (`schedule`). Every
   exe runs on every env; `[exe.<name>.env.<env>]` overrides its config there.
@@ -34,11 +33,10 @@ either `uv tool install .` from a checkout ([uv](https://docs.astral.sh/uv/)), o
 `make build` → `dist/anci`, a single file that needs only Python 3.12+.
 
 The CLI runs on Linux and macOS; on Windows, run it inside WSL2. A **VM on your dev
-machine** is Linux-only; on a Mac, use a remote libvirt host or someone else's box.
+machine** is Linux-only; on a Mac, use a remote libvirt host.
 
-> **Tested on:** an Ubuntu-family Linux dev machine running local VMs, and adopted
-> Debian 13 boxes. **Untested:** macOS and WSL2 as the dev machine, remote libvirt
-> hosts, SELinux hosts (Fedora, RHEL), and adopted boxes on other distros.
+> **Tested on:** an Ubuntu-family Linux dev machine running local VMs. **Untested:**
+> macOS and WSL2 as the dev machine, remote libvirt hosts, and SELinux hosts (Fedora, RHEL).
 
 A **VM** (on your dev machine or a remote host) needs, on the machine that runs it,
 any Linux distro with KVM (`/dev/kvm`) and:
@@ -67,8 +65,6 @@ sudo usermod -aG libvirt "$USER"    # then log out and back in
 
 Without it those commands still work, but leave out what they'd read from the VM.
 
-**Someone else's box** needs only ssh access (see the Quickstart for what it must run).
-
 ## Quickstart
 
 ```bash
@@ -79,28 +75,6 @@ anci dev migrate main-db       # apply migrations (also starts backups)
 anci dev deploy demo           # ship your binary
 anci dev status                # what's running here
 ```
-
-`up` works the same for every kind of box. For someone else's box (a rented VPS,
-`mode = 'adopt'`), the first `up` sets it up: it shows the box's host key for
-you to confirm, then logs in as `--user` (default `root`) to create your
-accounts, and pins the key (commit `envs/<env>/hostkey`) once that succeeds.
-Later `up`s log in as you; `--user` again reruns the setup.
-
-```bash
-anci prod up --user debian     # first time: confirm the host key, bootstrap
-anci prod deploy demo
-```
-
-That first `up` **checks the box before touching it** and refuses anything it
-can't support — so you never end up with a half-set-up box. The box must be:
-
-- a **glibc** Linux (any distro — Debian, Ubuntu, Fedora, RHEL, openSUSE…; not a
-  musl distro like Alpine), on **x86_64** (anci's pinned binaries are glibc amd64);
-- actually **booted with systemd** (not just `systemctl` present);
-- with **`bash`** available; and
-- your login user (root, or `--user <name>`) must have **passwordless `sudo`**.
-
-It also scans and records the box's host key for you to eyeball and commit.
 
 ## `anci.toml`
 
@@ -114,10 +88,9 @@ access-users = ['jack']
 vm = { anci-version = '0.0.1', vcpus = 2, mem = '2gb', disk = '20gb' }
 
 [env.prod]
-ip = '203.0.113.10'       # a rented VPS
-mode = 'adopt'
+ip = '203.0.113.10'       # a remote libvirt host
 access-users = ['jack']
-vm = { anci-version = '0.0.1' }   # adopt: no vcpus/mem/disk
+vm = { anci-version = '0.0.1', vcpus = 2, mem = '2gb', disk = '20gb' }
 
 [exe.demo]
 source = './target/release/server'
@@ -169,27 +142,20 @@ long". (Secrets encryption scales well past that: 300 keys encrypt in ~0.2s.)
 
 ```toml
 [env.dev]
-ip = '127.0.0.1'          # the machine: this dev machine, or a host / VPS address
+ip = '127.0.0.1'          # the machine: this dev machine, or a remote libvirt host
 access-users = ['jack']   # who may deploy here
-# mode = 'adopt'          # someone else's box: set it up over ssh instead of provisioning a VM
-# port = 2222             # optional: sshd port if it isn't 22
 vm = { anci-version = '0.0.1', vcpus = 2, mem = '2gb', disk = '20gb' }
 ```
 
-- `ip` is "the machine"; `mode` says who provisions the box on it (`full`, the
-  default: anci runs a VM; `adopt`: an existing box):
+- `ip` is the machine anci runs the env's VM on:
   - `ip = '127.0.0.1'` — a VM anci runs on your dev machine (`anci <env> up`).
-  - `ip = '<host>'` (`mode = 'full'`, the default) — a VM anci runs on a remote
+  - `ip = '<host>'` — a VM anci runs on a remote
     libvirt host (prerequisites in **Before you start**). The VM sits on the host's
     private network; anci reaches it through the host (`ssh -J <you>@<host>`).
     To serve a `host` from it, point the `A` record at the **host's** public
     address and open 80/tcp, 443/tcp and 443/udp in any host/provider firewall —
     the host forwards those ports to the VM. One public env per host: a second
     env with a `host` on the same machine is refused.
-  - `mode = 'adopt'` + `ip` — someone else's box; the first `anci <env> up` sets it
-    up (see the Quickstart).
-- `port` is the box's sshd port (default 22) — set it if your provider moved ssh
-  off 22.
 - `vm = { … }` is the box's machine config (see below).
 
 ### `env.<name>.vm` — the box's machine config
@@ -201,8 +167,7 @@ vm = { anci-version = '0.0.1', vcpus = 2, mem = '2gb', disk = '20gb' }
 
 - `anci-version` is the one knob that pins the supply chain — you never pin
   caddy/litestream versions individually.
-- `vcpus`/`mem`/`disk` apply only to boxes anci provisions (local or on a remote
-  host); on an adopted env (`mode = 'adopt'`) they're an error (the provider already sized it).
+- `vcpus`/`mem`/`disk` are required; they size the VM.
 
 ### `[exe.<name>]` — your binary
 
@@ -382,14 +347,14 @@ Your `source` is uploaded as-is and run on the guest, so it must run on *that*
 box. anci deploys **native binaries, not scripts**: a `#!` script needs its
 interpreter installed on the box, so scripts (and interpreted apps) are refused
 up front. anci's own components (Caddy, litestream, sops) are static Go binaries
-and run anywhere; **your binary is the variable**. Someone else's box is whatever the
-provider pinned, which is often **older** than anci's pinned Debian-13 image, so the risky
+and run anywhere; **your binary is the variable**. Every box runs anci's pinned
+Debian 13 image, which may be **older** than your build machine, so the risky
 direction is *build newest, run oldest*. Two rules:
 
-1. **Build for amd64.** Every box is x86_64 (`up` checks this); an arm64 build
-   fails at runtime with `Exec format error`.
-2. **Don't depend on the guest's libc / CPU.** The provider's glibc may be older
-   than your build host's, and its CPU may lack newer instructions.
+1. **Build for amd64.** Every box is x86_64; an arm64 build fails at runtime with
+   `Exec format error`.
+2. **Don't depend on the guest's libc / CPU.** The box's glibc may be older than
+   your build machine's, and its host's CPU may lack newer instructions.
 
 | language | build | why |
 |---|---|---|
@@ -450,7 +415,7 @@ Global flags: `--debug` (raw commands/stderr, and the `status` drift report),
 
 | command | what it does |
 |---|---|
-| `anci <env> up` | bring the env's box up (idempotent): provision + boot its VM (`--recreate` rebuilds from scratch), resize it to the conf, and converge it (units, secrets, caddy, litestream; no new binaries), or set up an adopted box (`mode = 'adopt'`) on first contact (`--user <login>`, default `root`) |
+| `anci <env> up` | bring the env's box up (idempotent): provision + boot its VM (`--recreate` rebuilds from scratch), resize it to the conf, and converge it (units, secrets, caddy, litestream; no new binaries) |
 | `anci <env> down` | stop the env's VM (keeps its disk) |
 | `anci <env> status` | this env: versions, state, URLs, plus a db table (last migration, size, replication lag); `--debug` adds the drift report |
 | `anci <env> plan` | what on the box differs from `anci.toml`, one line per difference (`+` add, `~` change, `-` remove); changes nothing |

@@ -1,3 +1,14 @@
+import atexit
+import os
+import shutil
+import tempfile
+
+# no test writes into this machine's real state dir (a local env's recorded box
+# address lives there): every run gets a throwaway one
+_STATE = tempfile.mkdtemp(prefix="anci-test-state-")
+os.environ["XDG_STATE_HOME"] = _STATE
+atexit.register(shutil.rmtree, _STATE, ignore_errors=True)
+
 from anci import forward
 
 # the real one, for the tests of the forward itself (which fake its sudo and files)
@@ -22,3 +33,12 @@ REAL_BINARIES = vendored.binaries
 # no test downloads (or hashes) the real caddy/litestream/sqlite3: by default an
 # env pins none; a test that wants some patches `binaries` itself
 vendored.binaries = lambda conf, env_name: {}
+
+
+def record_addresses(conf):
+    """Record an address for every env of `conf`, as `up` would have."""
+    from anci import addresses
+
+    for i, name in enumerate(sorted(conf.envs)):
+        addresses.record(conf, name, f"192.168.122.{50 + i}")
+    return conf

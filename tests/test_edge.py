@@ -4,9 +4,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from anci.render import caddy
-from anci import edge, errors, net, paths
-from anci.conf import allocate_ports, load
+from tests import record_addresses
+from anci import addresses, edge, errors, net, paths
+from anci.conf import load
 from anci.hashes import sha256_text
 
 
@@ -30,7 +30,7 @@ source = 'target/web'
 {exe_host}
 """)
     fd.close()
-    return load(fd.name)
+    return record_addresses(load(fd.name))
 
 
 class FakeHost:
@@ -83,12 +83,6 @@ class TestRender(unittest.TestCase):
         self.assertIn("--ctstate DNAT", s)
         self.assertNotIn("virsh", s)  # runs inside libvirt's hook
 
-    def test_caddyfile_for_remote_uses_acme_without_proxy_protocol(self):
-        conf = _conf()
-        text = caddy.caddyfile_for(conf, "prod", allocate_ports(conf))
-        self.assertIn("app.example.com {", text)
-        self.assertNotIn("proxy_protocol", text)
-        self.assertNotIn("tls ", text)   # Let's Encrypt
 
 
 class TestReconcile(unittest.TestCase):
@@ -96,7 +90,7 @@ class TestReconcile(unittest.TestCase):
         conf = _conf()
         fake = FakeHost()
         detail = _reconcile(conf, fake)
-        vm_ip = net.env_ip(paths.box_id(conf), "prod")
+        vm_ip = addresses.recorded(conf, "prod")
         self.assertEqual(detail, f"80/443 → {vm_ip}")
         written = {s: i for s, i in fake.scripts if i is not None}
         self.assertEqual(len(written), 4)
@@ -110,7 +104,7 @@ class TestReconcile(unittest.TestCase):
     def test_unchanged_host_only_reapplies(self):
         conf = _conf()
         bid = paths.box_id(conf)
-        vm_ip = net.env_ip(bid, "prod")
+        vm_ip = addresses.recorded(conf, "prod")
         texts = {
             edge.ROUTE_FILE: edge.render_route(f"{bid}/prod", net.domain_name(bid, "prod"),
                                                vm_ip, "virbr0"),

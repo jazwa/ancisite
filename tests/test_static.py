@@ -1,9 +1,7 @@
 """Static files: conf, packing/version ids, gc, deploy."""
 
 import contextlib
-import io
 import os
-import shutil
 import subprocess
 import tempfile
 import time
@@ -12,7 +10,6 @@ from pathlib import Path
 from unittest import mock
 
 from anci import auth, errors, layout, staticfiles
-from anci.hashes import sha256_file
 from anci.commands import deploy as dep
 from anci.conf import ConfError, load
 from anci.inspect import walk
@@ -29,8 +26,7 @@ vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 [env.prod]
 ip = '203.0.113.10'
 access-users = ['jack']
-mode = 'adopt'
-vm = { anci-version = '0.0.1' }
+vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 
 [exe.app]
 source = './bin/server'

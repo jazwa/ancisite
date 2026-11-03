@@ -26,7 +26,6 @@ Reconcile brings the env in line with `anci.toml`, without shipping new exes or 
 ## Good to know
 
 - Disks can grow but not shrink.
-- On an adopted env (`mode = 'adopt'`) there's no VM to resize; everything else applies.
 
 ## Next steps
 

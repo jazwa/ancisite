@@ -5,7 +5,6 @@ import unittest
 from anci.render import edge, fwd
 from anci.render.cloudinit import render_userdata
 from anci.render.systemd import render_oneshot, render_timer, render_unit
-from anci.net import sanitize_domain, stable_mac
 
 
 class TestRenderUnit(unittest.TestCase):
@@ -206,16 +205,6 @@ class TestRenderUserdata(unittest.TestCase):
     def test_refuses_empty(self):
         with self.assertRaises(ValueError):
             render_userdata({})
-
-
-class TestNames(unittest.TestCase):
-    def test_sanitize_domain(self):
-        self.assertEqual(sanitize_domain("my vm/2"), "my-vm-2")
-
-    def test_stable_mac_deterministic_and_prefix(self):
-        self.assertEqual(stable_mac("p-1", "my-vm"), stable_mac("p-1", "my-vm"))
-        self.assertNotEqual(stable_mac("p-1", "a"), stable_mac("p-1", "b"))
-        self.assertTrue(stable_mac("p-1", "my-vm").startswith("52:54:00:"))
 
 
 class TestLibvirtHooks(unittest.TestCase):

@@ -1,7 +1,6 @@
 import unittest
-from unittest import mock
 
-from anci import auth, releases
+from anci import releases
 from anci.conf import Conf, User
 
 
@@ -28,33 +27,6 @@ class TestLatestRelease(unittest.TestCase):
                  ("demo", '{"ts": "2026-09-30T17')]          # torn trailing line
         self.assertEqual(status._latest_release(lines, "demo", "dev")["user"], "alice")
         self.assertIsNone(status._latest_release(lines, "other", "dev"))
-
-
-class TestIdentifyUser(unittest.TestCase):
-    def test_matches_by_key(self):
-        with mock.patch.object(auth.subprocess, "run", side_effect=OSError):
-            with mock.patch.object(auth.Path, "home") as fake_home:
-                fake = fake_home.return_value / "x"  # unused; patch read path below
-                # provide key via ~/.ssh/id_ed25519.pub
-                import tempfile
-                from pathlib import Path
-
-                with tempfile.TemporaryDirectory() as td:
-                    ssh_dir = Path(td) / ".ssh"
-                    ssh_dir.mkdir()
-                    (ssh_dir / "id_ed25519.pub").write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack")
-                    fake_home.return_value = Path(td)
-                    self.assertEqual(auth.identify_user(make_conf()), "jack")
-
-    def test_unknown_when_no_match(self):
-        with mock.patch.object(auth.subprocess, "run", side_effect=OSError):
-            with mock.patch.object(auth.Path, "home") as fake_home:
-                import tempfile
-                from pathlib import Path
-
-                with tempfile.TemporaryDirectory() as td:
-                    fake_home.return_value = Path(td)
-                    self.assertEqual(auth.identify_user(make_conf()), "?")
 
 
 class TestAppend(unittest.TestCase):

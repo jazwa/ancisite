@@ -1,20 +1,8 @@
 import unittest
 
-from anci import versions as vmod
-from anci.render.caddy import SECURITY_HEADERS, render_caddyfile
+from anci.conf import Conf, Env, Exe, ExeOverride, allocate_ports
+from anci.render.caddy import SECURITY_HEADERS, caddyfile_for, render_caddyfile
 from anci.render.systemd import render_caddy_unit
-
-
-def load_entry():
-    return vmod.get(vmod.load(), "0.0.1")
-
-
-class TestVersionsCaddy(unittest.TestCase):
-    def test_pinned_caddy_has_url_and_checksum(self):
-        e = load_entry()
-        self.assertEqual(e.caddy, "2.11.7")
-        self.assertTrue(e.caddy_url.startswith("https://github.com/caddyserver/caddy/releases/"))
-        self.assertEqual(len(e.caddy_sha512), 128)
 
 
 class TestRenderCaddyfile(unittest.TestCase):
@@ -45,6 +33,20 @@ class TestRenderCaddyfile(unittest.TestCase):
 
     def test_empty_sites_is_empty(self):
         self.assertEqual(render_caddyfile([]).strip(), "")
+
+
+class TestCaddyfileFor(unittest.TestCase):
+    def test_remote_site_uses_acme_without_proxy_protocol(self):
+        conf = Conf(
+            users={},
+            envs={"prod": Env(name="prod", ip="10.0.0.5", access_users=[], anci_version="0.0.1")},
+            exes={"web": Exe(name="web", source="./s", env_overrides={
+                "prod": ExeOverride(env="prod", host="app.example.com")})},
+        )
+        text = caddyfile_for(conf, "prod", allocate_ports(conf))
+        self.assertIn("app.example.com {", text)
+        self.assertNotIn("proxy_protocol", text)
+        self.assertNotIn("tls ", text)   # Let's Encrypt
 
 
 class TestRenderCaddyUnit(unittest.TestCase):

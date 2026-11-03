@@ -96,7 +96,7 @@ def hold(conn: ssh.Conn, user: str, what: str, *, wait_ready: bool = False):
     try:
         proc = _acquire(conn, user, what)
     except ssh.SSHError as e:
-        if not (wait_ready and ssh.boot_race(conn, e)):
+        if not (wait_ready and ssh.boot_race(e)):
             raise
         ssh.wait_ready(conn)
         proc = _acquire(conn, user, what)

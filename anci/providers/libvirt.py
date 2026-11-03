@@ -26,10 +26,10 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
-from .. import errors, net, paths, ui, versions as versions_mod
-from ..box import is_remote, is_remote_host
+from .. import addresses, errors, net, paths, ui, versions as versions_mod
+from ..box import is_remote_host
 from ..ssh import pin_path
-from ..hypervisor import Hypervisor, hypervisor, libvirt_hypervisor
+from ..hypervisor import VIRSH, Hypervisor, hypervisor, libvirt_hypervisor
 from ..render.cloudinit import render_network_config, render_userdata
 from ..conf import Conf, Env, disk_to_qemu, mem_to_kib, mem_to_mib
 
@@ -65,8 +65,7 @@ def _require_daemon(hv: Hypervisor) -> None:
     raise errors.EnvError(
         f"can't reach libvirt on {hv.where}",
         why="anci manages the box over ssh + passwordless sudo as your conf user",
-        try_=f"check `ssh {hv.login} sudo -n virsh uri` works. "
-             "If it's someone else's box (no libvirt), set mode = 'adopt' for this env",
+        try_=f"check `ssh {hv.login} sudo -n virsh uri` works, and that the host has libvirt installed",
         debug=(p.stderr or "").strip(),
     )
 
@@ -344,7 +343,7 @@ def _facts_summary(facts: DomainFacts) -> str:
 
 def vm_differences(conf: Conf, env_name: str) -> dict[str, tuple[str, str]]:
     env = conf.envs.get(env_name)
-    if env is None or is_remote(env):
+    if env is None:
         return {}
     hv = hypervisor(conf, env_name) if is_remote_host(env) else Hypervisor(sudo=False)
     dom_name = net.domain_name(paths.box_id(conf), env.name)
@@ -391,7 +390,7 @@ def _require_running(env_name: str, state: str) -> None:
 
 def require_running(conf: Conf, env_name: str) -> None:
     env = conf.envs.get(env_name)
-    if env is None or is_remote(env):
+    if env is None:
         return
     dom_name = net.domain_name(paths.box_id(conf), env.name)
     args = ["virsh", "--connect", "qemu:///system", "--quiet", "domstate", dom_name]
@@ -410,7 +409,7 @@ def require_running(conf: Conf, env_name: str) -> None:
 
 def vm_reconcile(conf: Conf, env_name: str) -> None:
     env = conf.envs.get(env_name)
-    if env is None or is_remote(env):
+    if env is None:
         return
     hv = libvirt_hypervisor(conf, env_name)
     _require_daemon(hv)
@@ -424,22 +423,24 @@ def vm_reconcile(conf: Conf, env_name: str) -> None:
         print(f"  {ui.green('✓')} resized {dom_name}: {summary}")
 
 
-_DESC_RE = re.compile(r"<description>(.*?)</description>", re.S)
 _DESC_FIELD_RE = re.compile(r"(\w+)=(\S+)")
+
+# every anci box on the host and its description, one `<name>\t<description>`
+# line each — a single round trip however many boxes there are
+_REGISTRY_SCRIPT = f"""set -o pipefail
+{VIRSH} list --all --name | while read -r d; do
+  case "$d" in anci-*) printf '%s\\t%s\\n' "$d" "$({VIRSH} desc "$d" | tr '\\n' ' ')" ;; esac
+done
+"""
 
 
 def _registry(hv: Hypervisor) -> dict[str, str]:
     out: dict[str, str] = {}
-    listing = hv.virsh("list", "--all", "--name", check=False)
-    if listing.returncode != 0:
+    p = hv.run(_REGISTRY_SCRIPT)
+    if p.returncode != 0:
         return out
-    for name in listing.stdout.split():
-        if not name.startswith("anci-"):
-            continue
-        m = _DESC_RE.search(hv.virsh("dumpxml", name, check=False).stdout or "")
-        if not m:
-            continue
-        fields = dict(_DESC_FIELD_RE.findall(m.group(1)))
+    for line in p.stdout.splitlines():
+        fields = dict(_DESC_FIELD_RE.findall(line.partition("\t")[2]))
         if fields.get("ip"):
             out[fields["ip"]] = f"{fields.get('box_id', '?')}/{fields.get('env', '?')}"
     return out
@@ -449,14 +450,36 @@ def _stamp(hv: Hypervisor, dom_name: str, box_id: str, env_name: str, ip: str) -
     hv.virsh("desc", dom_name, f"anci box_id={box_id} env={env_name} ip={ip}", check=False)
 
 
-def _claim_or_fail(hv: Hypervisor, conf: Conf, env_name: str, ip: str) -> None:
-    owner = _registry(hv).get(ip)
-    if owner and owner != f"{paths.box_id(conf)}/{env_name}":
+def _assign_address(hv: Hypervisor, conf: Conf, env_name: str) -> tuple[str, bool]:
+    """This env's address on the host, and whether it was newly picked.
+
+    The recorded address wins; then the one stamped on this env's existing VM (a
+    box made before addresses were recorded, or a record that wasn't committed);
+    otherwise the first address no anci box on the host holds.
+    """
+    registry = _registry(hv)
+    me = f"{paths.box_id(conf)}/{env_name}"
+    ip = addresses.recorded(conf, env_name)
+    if ip is None:
+        ip = next((a for a, owner in registry.items() if owner == me), None)
+        if ip is None:
+            ip = net.first_free(registry)
+            if ip is None:
+                raise errors.EnvError(
+                    f"no free address for {env_name} on {hv.where}",
+                    why=f"anci's {net.STATIC_POOL} addresses there are all taken by other boxes",
+                    try_="remove a box you no longer use",
+                )
+            return ip, True
+    owner = registry.get(ip)
+    if owner and owner != me:
         raise errors.EnvError(
             f"the address {ip} is already claimed by {owner}",
-            why="two boxes can't share a static address (one env = one box)",
-            try_="rename this env, or remove the other box",
+            why="two boxes can't share an address on one host",
+            try_=f"delete {addresses.address_path(conf, env_name)} and re-run "
+                 f"`anci {env_name} up` to pick a free one",
         )
+    return ip, False
 
 
 def _managed_env(conf: Conf, env_name: str) -> Env:
@@ -467,8 +490,6 @@ def _managed_env(conf: Conf, env_name: str) -> Env:
             why=f"defined envs: {', '.join(sorted(conf.envs)) or '(none)'}",
             try_=f"add [env.{env_name}] to anci.toml",
         )
-    if is_remote(env):
-        raise errors.ConfError(f"env '{env_name}' is mode = 'adopt' — anci provisions no VM for it")
     return env
 
 
@@ -481,15 +502,18 @@ def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
 
     bid = paths.box_id(conf)
     dom_name = net.domain_name(bid, env.name)
-    ip = net.env_ip(bid, env.name)
     mac = net.stable_mac(bid, env.name)
-    _claim_or_fail(hv, conf, env_name, ip)
+    ip, new_address = _assign_address(hv, conf, env_name)
+    recorded_at = addresses.record(conf, env_name, ip)
     where = "" if hv.login is None else f" on {hv.where}"
     print(
         f"\n  {ui.bold(env_name)}  "
         f"{ui.dim(f'{env.vcpus} vcpus · {env.mem} · {env.disk} · stack {env.anci_version}')}"
     )
-    print(f"  {ui.dim(f'assigned address {ip}{where}')}\n")
+    print(f"  {ui.dim(f'address {ip}{where}')}")
+    if new_address and is_remote_host(env):
+        print(f"  {ui.dim(f'recorded in {recorded_at.relative_to(paths.project_root(conf))} — commit it')}")
+    print()
 
     own = pipe is None
     pipe = pipe or ui.Pipeline()

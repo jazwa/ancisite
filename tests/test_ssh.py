@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from anci import ssh
+from tests import record_addresses
 
 
 class TestConnArgv(unittest.TestCase):
@@ -42,16 +43,6 @@ class TestConnArgv(unittest.TestCase):
         self.assertIn("StrictHostKeyChecking=yes", argv)
 
 
-class TestSSHError(unittest.TestCase):
-    def test_unreachable_flag(self):
-        e = ssh.SSHError("nope", unreachable=True)
-        self.assertTrue(e.unreachable)
-        self.assertFalse(ssh.SSHError("boom").unreachable)
-
-    def test_auth_flag_defaults_off(self):
-        self.assertFalse(ssh.SSHError("boom").auth)
-
-
 class TestClassify(unittest.TestCase):
     def test_permission_denied_is_auth(self):
         self.assertEqual(ssh._classify("Permission denied (publickey)."), (False, True))
@@ -66,9 +57,6 @@ class TestClassify(unittest.TestCase):
 
 
 class TestConnPort(unittest.TestCase):
-    def test_default_port_is_22(self):
-        self.assertEqual(ssh.Conn(ip="x").argv(["true"])[:3], ["ssh", "-p", "22"])
-
     def test_custom_port_flows_into_argv(self):
         self.assertIn("2222", ssh.Conn(ip="x", port=2222).argv(["true"]))
 
@@ -248,40 +236,81 @@ class TestWaitReady(unittest.TestCase):
             with self.assertRaises(ssh.SSHError):
                 ssh.wait_ready(conn, auth_timeout=0)
 
-    def test_adopted_box_fails_fast(self):
-        # an adopted box's accounts predate its pin: a refusal is never a boot race
-        for err in (ssh.SSHError("no", auth=True), ssh.SSHError("down", unreachable=True)):
-            with mock.patch.object(ssh, "run", side_effect=err) as run, \
-                 mock.patch.object(ssh.time, "sleep") as sleep:
-                with self.assertRaises(ssh.SSHError):
-                    ssh.wait_ready(ssh.Conn(ip="x", boots=False))
-            run.assert_called_once()
-            sleep.assert_not_called()
-
     def test_boot_race(self):
         auth, down, other = (ssh.SSHError("e", auth=True), ssh.SSHError("e", unreachable=True),
                              ssh.SSHError("e"))
-        booting = ssh.Conn(ip="x")
-        self.assertTrue(ssh.boot_race(booting, auth))
-        self.assertTrue(ssh.boot_race(booting, down))
-        self.assertFalse(ssh.boot_race(booting, other))
-        self.assertFalse(ssh.boot_race(ssh.Conn(ip="x", boots=False), auth))
+        self.assertTrue(ssh.boot_race(auth))
+        self.assertTrue(ssh.boot_race(down))
+        self.assertFalse(ssh.boot_race(other))
+
+
+CONNECT_CONF = """
+[user.jack]
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b'
+
+[env.dev]
+ip = '127.0.0.1'
+access-users = ['jack']
+vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
+
+[env.prod]
+ip = '10.0.0.5'
+access-users = ['jack']
+vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
+"""
+
+
+class TestConnect(unittest.TestCase):
+    """`ssh.connect`: how anci reaches each kind of box."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        runtime = mock.patch.dict("os.environ", {"XDG_RUNTIME_DIR": td.name})
+        runtime.start()
+        self.addCleanup(runtime.stop)
+        p = Path(td.name) / "anci.toml"
+        p.write_text(CONNECT_CONF)
+        from anci.conf import load
+        self.conf = record_addresses(load(str(p)))
+
+    def _connect(self, env):
+        with contextlib.redirect_stdout(io.StringIO()):   # the first-contact notice
+            return ssh.connect(self.conf, env, "jack")
+
+    def test_local_box(self):
+        conn = self._connect("dev")
+        self.assertEqual(conn.ip, ssh.box.resolve_env_ip(self.conf, "dev"))
+        # no pinning: this machine is the trust root
+        self.assertIn("StrictHostKeyChecking=no", conn.opts)
+        self.assertIn("UserKnownHostsFile=/dev/null", conn.opts)
+        self.assertFalse(any(o.startswith("ProxyJump") for o in conn.opts))
+        # never a password prompt; one shared master connection
+        self.assertIn("BatchMode=yes", conn.opts)
+        self.assertIn("ControlMaster=auto", conn.opts)
+        self.assertIn("ControlPersist=10m", conn.opts)
+        self.assertIn(f"ControlPath={ssh._mux_socket('jack', conn.ip, 22)}", conn.opts)
+
+    def test_remote_box_is_reached_through_its_host_and_pinned(self):
+        pin = ssh.pin_path(self.conf, "prod")
+        pin.parent.mkdir(parents=True, exist_ok=True)
+        pin.write_text("192.168.122.51 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f4\n")
+        conn = self._connect("prod")
+        self.assertIn("ProxyJump=jack@10.0.0.5", conn.opts)
+        self.assertEqual(conn.ip, ssh.box.resolve_env_ip(self.conf, "prod"))   # the VM, not the host
+        self.assertIn("StrictHostKeyChecking=yes", conn.opts)
+        self.assertIn(f"UserKnownHostsFile={pin}", conn.opts)
+
+    def test_first_contact_records_the_host_key(self):
+        conn = self._connect("prod")
+        self.assertIn("StrictHostKeyChecking=accept-new", conn.opts)
+        # regression: ssh can't create the pin's parent dir, so connect must
+        self.assertTrue(ssh.pin_path(self.conf, "prod").parent.is_dir())
 
 
 class TestMux(unittest.TestCase):
     """One shared master connection per (user, box, port) — the per-command
     SSH process cost multiplier lives and dies with these options."""
-
-    def _load_in(self, td: str):
-        from anci.conf import load
-        fd = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
-        fd.write(
-            "[user.jack]\nssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b'\n\n"
-            "[env.dev]\nip = '127.0.0.1'\naccess-users = ['jack']\n"
-            "vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }\n"
-        )
-        fd.close()
-        return load(fd.name)
 
     def test_socket_dir_is_private_and_per_uid(self):
         with tempfile.TemporaryDirectory() as td, \
@@ -303,34 +332,6 @@ class TestMux(unittest.TestCase):
             path = ssh._mux_socket("a-rather-long-username", "2001:db8:ffff:ffff:ffff:ffff:ffff:fffe", 22)
         self.assertLess(len(path) + 17, 104)
 
-    def test_connect_opts_in_all_branches(self):
-        with tempfile.TemporaryDirectory() as td, \
-             mock.patch.dict("os.environ", {"XDG_RUNTIME_DIR": td}):
-            conn = ssh.connect(self._load_in(td), "dev", "jack")
-            sock = ssh._mux_socket("jack", conn.ip, 22)
-        self.assertIn("ControlMaster=auto", conn.opts)
-        self.assertIn("ControlPersist=10m", conn.opts)
-        self.assertIn(f"ControlPath={sock}", conn.opts)
-        # local box has no pinning (check from the preexisting contract)
-        self.assertIn("StrictHostKeyChecking=no", conn.opts)
-        self.assertTrue(conn.boots)
-
-    def test_adopted_box_doesnt_boot(self):
-        from anci.conf import load
-        with tempfile.TemporaryDirectory() as td, \
-             mock.patch.dict("os.environ", {"XDG_RUNTIME_DIR": td}):
-            p = Path(td) / "anci.toml"
-            p.write_text("[user.jack]\nssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b'\n\n"
-                         "[env.prod]\nip = '203.0.113.10'\naccess-users = ['jack']\n"
-                         "mode = 'adopt'\nvm = { anci-version = '0.0.1' }\n")
-            (Path(td) / "envs" / "prod").mkdir(parents=True)
-            (Path(td) / "envs" / "prod" / "hostkey").write_text("203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f4\n")
-            conn = ssh.connect(load(str(p)), "prod", "jack")
-        self.assertFalse(conn.boots)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestFacts(unittest.TestCase):

@@ -2,10 +2,8 @@
 
 The anci CLI runs on macOS, but your apps run on x86_64 Linux.
 
-Your best bet for Mac development is to put the dev env somewhere else:
-
-- **A Linux machine you own** (a homelab, a spare PC): `ip = '<that machine>'`.
-- **A VPS**: `mode = 'adopt'`.
+Your best bet for Mac development is to run the dev env's VM on a Linux machine you own (a homelab, a spare PC,
+or a server that supports KVM): `ip = '<that machine>'`. See [hosts.md](hosts.md).
 
 You'll also need to explicitly build for x86_64 Linux. Example for Go: `GOOS=linux GOARCH=amd64 go build`.
 

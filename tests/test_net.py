@@ -3,7 +3,7 @@ import unittest
 
 from anci.render.cloudinit import render_network_config
 from anci.net import (
-    domain_name, env_ip, stable_mac, sanitize_domain,
+    domain_name, first_free, pool, stable_mac, sanitize_domain,
     DEFAULT_GATEWAY, STATIC_BASE, STATIC_POOL,
 )
 
@@ -11,25 +11,22 @@ BID = "ancisite-3f9a2c"
 
 
 class TestStaticAddressing(unittest.TestCase):
-    def test_deterministic_and_in_pool(self):
-        for name in ("my-vm", "staging-vm", "a", "b"):
-            ip = env_ip(BID, name)
-            last_octet = int(ip.rsplit(".", 1)[1])
-            self.assertTrue(ip.startswith("192.168.122."))
-            self.assertTrue(STATIC_BASE <= last_octet < STATIC_BASE + STATIC_POOL)
-            self.assertEqual(env_ip(BID, name), ip)  # deterministic
+    def test_pool_is_the_static_range(self):
+        ips = pool()
+        self.assertEqual(len(ips), STATIC_POOL)
+        self.assertEqual(ips[0], f"192.168.122.{STATIC_BASE}")
+        self.assertEqual(ips[-1], f"192.168.122.{STATIC_BASE + STATIC_POOL - 1}")
 
-    def test_distinct_names_usually_differ(self):
-        ips = {env_ip(BID, n) for n in [f"vm-{i}" for i in range(32)]}
-        self.assertGreater(len(ips), 8)  # hash spread over the 64-address pool
+    def test_first_free_skips_taken_addresses(self):
+        self.assertEqual(first_free([]), "192.168.122.50")
+        self.assertEqual(first_free(["192.168.122.50", "192.168.122.51"]), "192.168.122.52")
+        # a gap left by a removed box is reused before the end of the pool
+        self.assertEqual(first_free(["192.168.122.50", "192.168.122.52"]), "192.168.122.51")
+        self.assertIsNone(first_free(pool()))
 
-    def test_projects_get_different_seeds(self):
-        # different box ids (projects) move the address even for the same env
-        self.assertNotEqual(env_ip("proj-a-000000", "dev"), env_ip("proj-b-111111", "dev"))
-
-    def test_mac_deterministic_not_ip_derived_path(self):
-        # mac and ip hash from different salts: a MAC change never moves an IP
+    def test_mac_deterministic(self):
         self.assertEqual(stable_mac(BID, "my-vm"), stable_mac(BID, "my-vm"))
+        self.assertNotEqual(stable_mac(BID, "a"), stable_mac(BID, "b"))
         self.assertTrue(stable_mac(BID, "my-vm").startswith("52:54:00:"))
 
     def test_domain_name_namespaces_by_project(self):

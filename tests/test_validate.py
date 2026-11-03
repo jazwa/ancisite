@@ -84,10 +84,6 @@ class TestValidateEnv(unittest.TestCase):
             conf = self._conf(td)
             validate.validate_env(conf, "prod")  # not defined -> returns
 
-    def test_load_does_not_require_secrets(self):
-        # validate_env is a CLI-time check; loading a conf alone is fine
-        with tempfile.TemporaryDirectory() as td:
-            self._conf(td)
 
 
 if __name__ == "__main__":

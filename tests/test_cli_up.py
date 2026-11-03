@@ -1,7 +1,5 @@
 """`anci <env> up` dispatch: one verb for every kind of box (no box)."""
 
-import contextlib
-import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,9 +19,8 @@ vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 
 [env.prod]
 ip = '203.0.113.10'
-mode = 'adopt'
 access-users = ['jack']
-vm = { anci-version = '0.0.1' }
+vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 """
 
 
@@ -38,63 +35,30 @@ class TestUpDispatch(unittest.TestCase):
         self.td.cleanup()
 
     def run_env(self, env, *argv):
-        with mock.patch("anci.providers.adopt.up_adopt") as ext, \
-             mock.patch("anci.providers.libvirt.env_up") as vm, \
+        with mock.patch("anci.providers.libvirt.env_up") as vm, \
              mock.patch("anci.inspect.run.converge") as infra:
             cli._run_env(self.conf, env, list(argv), debug=False)
-        return ext, vm, infra
+        return vm, infra
 
-    def test_adopt_up_bootstraps_then_converges(self):
-        ext, vm, infra = self.run_env("prod", "up", "--user", "ubuntu")
-        ext.assert_called_once_with(self.conf, "prod", login_user="ubuntu", pipe=mock.ANY)
-        vm.assert_not_called()
-        infra.assert_called_once_with(self.conf, "prod", grow_disk=True, pipe=mock.ANY)
-        # one report: the bootstrap and the converge share a pipeline
-        self.assertIs(ext.call_args.kwargs["pipe"], infra.call_args.kwargs["pipe"])
-
-    def test_adopt_up_without_user_passes_none(self):
-        # up_adopt picks root on first contact, and skips the bootstrap on a set-up box
-        ext, _, _ = self.run_env("prod", "up")
-        self.assertIsNone(ext.call_args.kwargs["login_user"])
-
-    def test_vm_up_goes_to_libvirt(self):
-        ext, vm, infra = self.run_env("dev", "up")
-        ext.assert_not_called()
-        vm.assert_called_once()
-        infra.assert_called_once()
-
-    def test_declined_bootstrap_never_converges(self):
-        with mock.patch("anci.providers.adopt.up_adopt",
-                        side_effect=errors.EnvError("declined")), \
-             mock.patch("anci.inspect.run.converge") as infra:
-            with self.assertRaises(errors.EnvError):
-                cli._run_env(self.conf, "prod", ["up"], debug=False)
-        infra.assert_not_called()
-
-    def test_user_on_a_vm_env_errors(self):
-        with self.assertRaises(errors.ConfError) as cm:
-            self.run_env("dev", "up", "--user", "ubuntu")
-        self.assertIn("--user", str(cm.exception))
-
-    def test_recreate_on_adopt_errors(self):
-        with self.assertRaises(errors.ConfError) as cm:
-            self.run_env("prod", "up", "--recreate")
-        self.assertIn("can't recreate", str(cm.exception))
-
-    def test_adopt_is_gone(self):
-        with self.assertRaises(errors.ConfError):
-            cli._run_env(self.conf, "prod", ["adopt"], debug=False)
+    def test_up_creates_the_vm_then_converges(self):
+        for env in ("dev", "prod"):
+            with self.subTest(env=env):
+                vm, infra = self.run_env(env, "up")
+                vm.assert_called_once()
+                infra.assert_called_once_with(self.conf, env, grow_disk=True, pipe=mock.ANY)
+                # one report: creating the VM and the converge share a pipeline
+                self.assertIs(vm.call_args.kwargs["pipe"], infra.call_args.kwargs["pipe"])
 
     def test_local_vm_on_macos_errors_before_libvirt(self):
         with mock.patch.object(cli.sys, "platform", "darwin"), \
              self.assertRaises(errors.ConfError) as cm:
-            _, vm, _ = self.run_env("dev", "up")
+            self.run_env("dev", "up")
         self.assertIn("needs Linux", str(cm.exception))
 
-    def test_adopted_box_on_macos_works(self):
+    def test_remote_host_vm_on_macos_works(self):
         with mock.patch.object(cli.sys, "platform", "darwin"):
-            ext, _, _ = self.run_env("prod", "up")
-        ext.assert_called_once()
+            vm, _ = self.run_env("prod", "up")
+        vm.assert_called_once()
 
 
 if __name__ == "__main__":

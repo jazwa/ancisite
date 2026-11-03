@@ -17,10 +17,8 @@ from unittest import mock
 
 from anci.render import caddy
 from anci import auth
-from anci import box
-from anci.providers import adopt as adopt_mod
 from anci import errors, ssh
-from anci.commands import dbs, deploy, status
+from anci.commands import deploy, status
 from anci.inspect import exe as exe_mod, vendored as vendored_mod
 from anci.conf import (
     Conf, Db, Env, Exe, ExeOverride, User, allocate_ports, load,
@@ -145,15 +143,6 @@ class TestScheduleConf(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(errors.ConfError):
                 load_conf(td, _tiny("schedule = 5"))
-
-
-class TestAppUrlJob(unittest.TestCase):
-    def test_job_has_no_url(self):
-        with tempfile.TemporaryDirectory() as td:
-            conf = load_conf(td, SCHEDULE_CONF)
-            with self.assertRaises(errors.ConfError) as cm:
-                box.app_url(conf, "cleanup-job", "dev")
-            self.assertIn("no URL", str(cm.exception))
 
 
 class TestDeployScheduled(unittest.TestCase):
@@ -297,16 +286,12 @@ class TestScheduledStatusScript(unittest.TestCase):
 
 
 class TestIsoUtc(unittest.TestCase):
-    def test_formats_systemd_timestamp(self):
-        self.assertEqual(status._iso_utc("Wed 2026-10-07 20:34:49 UTC"),
-                         "2026-10-07T20:34:49Z")
-
-    def test_empty_and_na(self):
-        self.assertIsNone(status._iso_utc(""))
-        self.assertIsNone(status._iso_utc("n/a"))
-
-    def test_unrecognized_left_alone(self):
-        self.assertEqual(status._iso_utc("whenever"), "whenever")
+    def test_converts_systemd_timestamps(self):
+        for raw, iso in (("Wed 2026-10-07 20:34:49 UTC", "2026-10-07T20:34:49Z"),
+                         ("", None), ("n/a", None),
+                         ("whenever", "whenever")):         # unrecognized: left alone
+            with self.subTest(raw=raw):
+                self.assertEqual(status._iso_utc(raw), iso)
 
 
 class TestDbRegenTimers(unittest.TestCase):
@@ -347,30 +332,6 @@ class TestDbRegenTimers(unittest.TestCase):
         self.assertIn("systemctl enable --now cleanup.timer", start)
         self.assertNotIn("cleanup.service", start)   # a oneshot isn't run by hand
         self.assertNotIn("ghost", start)             # an orphan is dead
-
-
-class TestJobsGetNoPort(unittest.TestCase):
-    def _conf(self) -> Conf:
-        return Conf(
-            users={},
-            envs={"dev": Env(name="dev", ip="127.0.0.1", access_users=[],
-                             anci_version="0.0.1")},
-            exes={
-                "app": Exe(name="app", source="./s",
-                           env_overrides={"dev": ExeOverride(env="dev")}),
-                "cleanup": Exe(name="cleanup", source="./s",
-                               schedule="daily",
-                               env_overrides={"dev": ExeOverride(env="dev")}),
-                "web": Exe(name="web", source="./s",
-                           env_overrides={"dev": ExeOverride(env="dev")}),
-            },
-        )
-
-    def test_ports_skip_jobs_without_shifting_services(self):
-        ports = allocate_ports(self._conf())
-        self.assertEqual(ports[("app", "dev")], 8000)
-        self.assertEqual(ports[("web", "dev")], 8010)  # the job consumed no slot
-        self.assertNotIn(("cleanup", "dev"), ports)
 
 
 class TestCaddySkipsJobs(unittest.TestCase):
