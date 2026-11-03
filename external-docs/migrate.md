@@ -55,6 +55,6 @@ are forgotten.
 
 ```
 anci <env> status                # each db's last migration, size and replication lag
-anci <env> info db <db>          # where the db file, extensions and replication config live on the box
+anci <env> info db <db>          # where the db file and extensions live, and where it replicates to
 anci <env> local-schema <db>     # a schema-only copy of the db on your machine
 ```

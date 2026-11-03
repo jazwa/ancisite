@@ -10,8 +10,8 @@ Status shows what's running in the env.
 ## What it shows
 
 - **Exes.** Each exe's deployed version, its state, its URL, and who deployed it last and when.
-- **Databases.** Each db's last applied migration, its size, how far its replica is behind, and where the
-  replica goes (`bucket/path`, or — when replication is off).
+- **Databases.** Each db's last applied migration, its size, and how far its replica is behind. Where the
+  replica goes is in `anci <env> info db <db>`.
 - **Caddy.** Whether the HTTPS front is running. On a remote env with no `host` it shows "not configured": your
   exes have no public HTTPS URL.
 - **How to ssh in.** The ssh command for the box.

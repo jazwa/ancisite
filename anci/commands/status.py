@@ -7,8 +7,8 @@ The deployed blob id is identity, not a readable version, so it lives in
 `anci info`, not here —
 a second boxed table for the conf's dbs — name, last migration (the guest's
 `_anci_migrations` bookkeeping), size (data file + wal), replication (the
-replica's last successful sync, read locally from the litestream daemon; the db rows replace a litestream checklist line),
-destination (the `bucket/path` anci.toml replicates it to on this env) — and a
+replica's last successful sync, read locally from the litestream daemon; the db rows replace a litestream checklist line)
+— where the replica goes is in `anci info` — and a
 checklist under it: caddy, the TLS front (litestream's health is per-db in the
 db table) — plus the ssh hint to log into the box.
 `--debug` adds the drift report: what `anci <env> plan` shows (everything on
@@ -32,7 +32,6 @@ from .. import auth, box, errors, forward, layout, releases as rel_mod, ssh, ui,
 from ..inspect import ObservedState, describe, diff, observed_state, target_state, worth_showing
 from ..inspect.exe import deployed
 from ..inspect.singletons import optional_services
-from ..render import litestream
 from ..layout import ANCI_USER
 from ..conf import Conf, allocate_ports
 
@@ -330,10 +329,6 @@ def _replication_cell(conf: Conf, env_name: str, db_name: str, st: DbState,
     return "litestream error" if wanted and not litestream_up else "off"
 
 
-def _destination_cell(conf: Conf, env_name: str, db_name: str) -> str:
-    db = conf.dbs[db_name].resolve_for(env_name)
-    return litestream.replica_target(db) if db.replication else "—"
-
 
 def _replication_notes(conf: Conf, env_name: str, report: "Report") -> list[str]:
     notes = []
@@ -385,7 +380,7 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
         for exe_name in exe_names:
             rows.append([exe_name, ui.dim("no access"), "—", "—", "—", "—"])
         for db_name in db_names:
-            db_rows.append([db_name, "—", "—", "—", "—"])
+            db_rows.append([db_name, "—", "—", "—"])
     else:
         try:
             conn = ssh.connect(conf, env.name, caller)
@@ -456,8 +451,7 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
             mech_checks = [_mech_check(u, None) for u in mech_units
                            if u != units.LITESTREAM_UNIT]
             for db_name in db_names:
-                db_rows.append([db_name, "—", "—", "—",
-                                _destination_cell(conf, env_name, db_name)])
+                db_rows.append([db_name, "—", "—", "—"])
         else:
             for unit in mech_units:
                 if unit == units.LITESTREAM_UNIT:
@@ -474,7 +468,6 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
                     f"{st.last}.sql" if st.last else "—",
                     ui.human_size(st.size) if st.size is not None else "—",
                     _replication_cell(conf, env_name, db_name, st, parsed.litestream_up),
-                    _destination_cell(conf, env_name, db_name),
                 ])
             db_notes = _replication_notes(conf, env_name, parsed)
         if unset_caddy:
@@ -487,7 +480,7 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
         print(ui.table(["exe", "state", "url", "cpu", "mem", "last deploy"], rows))
     if db_rows:
         print()
-        print(ui.table(["db", "last migration", "size", "replication", "destination"], db_rows))
+        print(ui.table(["db", "last migration", "size", "replication"], db_rows))
         for note in db_notes:
             print(f"  {ui.yellow('⚠')} {note}")
     box_stats = _box_stat_lines(parsed) if parsed is not None and not down else []

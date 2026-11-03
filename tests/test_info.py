@@ -56,6 +56,14 @@ class TestCoverage(unittest.TestCase):
         self.assertTrue({layout.db_path("main-db"), f"{layout.ext_dir('main-db')}/vec0.so",
                          layout.LITESTREAM_FILE} <= _paths(db))
 
+    def test_a_db_says_where_it_replicates_to(self):
+        conf = make_conf()
+        [db] = info_mod._subjects(conf, "dev", "db", "main-db")
+        self.assertEqual(db.note, "replica: backups/dev/main-db at https://s3.example.com")
+        conf.dbs["main-db"].replication = None
+        [db] = info_mod._subjects(conf, "dev", "db", "main-db")
+        self.assertEqual(db.note, "replication off")
+
     def test_bad_arguments_are_conf_errors(self):
         for kind, name in (("exe", None), ("exe", "nope"), ("box", "x"), (None, "app")):
             with self.assertRaises(errors.ConfError):
@@ -104,6 +112,7 @@ class TestInfo(unittest.TestCase):
         for name in ("app", "job", "main-db"):
             self.assertIn(name, out)
         self.assertIn("shared with app", out)
+        self.assertIn("replica: backups/dev/main-db at https://s3.example.com", out)
 
     def test_unauthorized_leaks_nothing(self):
         buf = io.StringIO()

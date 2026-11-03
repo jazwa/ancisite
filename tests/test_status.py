@@ -259,14 +259,6 @@ class TestReplicationCell(unittest.TestCase):
         self.assertIn("isn't replicating yet", notes(make_conf(), False)[0])
         self.assertEqual(notes(make_conf(), True), [])
 
-    def test_destination_is_the_resolved_replica_target(self):
-        self.assertEqual(status._destination_cell(make_conf(), "dev", "guests"),
-                         "guests-backups/dev/guests")                   # <env>/<db> default
-        explicit = make_conf(replication=Replication(bucket="b", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET", path="p"))
-        self.assertEqual(status._destination_cell(explicit, "dev", "guests"), "b/p")
-        self.assertEqual(status._destination_cell(make_conf(replication=None), "dev", "guests"), "—")
-
-
 class TestStatusDbTable(unittest.TestCase):
     def _conf(self) -> Conf:
         fd = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
@@ -317,8 +309,7 @@ class TestStatusDbTable(unittest.TestCase):
         self.assertIn("0003_add_guests.sql", text)   # full filename
         self.assertIn("12.0 KB", text)
         self.assertIn("2s since last sync", text)             # plain text, no grading
-        self.assertIn("destination", text)
-        self.assertIn("guests-backups/dev/guests", text)
+        self.assertNotIn("destination", text)        # where it goes is in `anci info`
         self.assertIn("ssh with", text)              # login hint when the box is up
 
     def test_checklist_drops_the_litestream_line(self):
@@ -340,7 +331,7 @@ class TestStatusDbTable(unittest.TestCase):
         self.assertNotIn("behind", text)
         self.assertNotIn("litestream down", text)
         self.assertNotIn("ssh with", text)           # no login hint for a down box
-        self.assertIn("guests-backups/dev/guests", text)   # conf-derived, still shown
+        self.assertIn("guests", text)                # the db is still listed
 
     def test_auth_failure_is_not_box_down(self):
         # a reachable box that refuses the login isn't "down" — it errors, and

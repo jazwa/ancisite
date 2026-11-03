@@ -1,7 +1,8 @@
 """`anci <env> info` — where an env's exe/db files live on the box, and how big.
 
 Read-only. Renders a tree grouped by root directory, with two aligned columns:
-the path on the left, its size and semantic meaning on the right. Everything is
+the path on the left, its size and semantic meaning on the right. A db's header
+also says where it replicates to (bucket/path at the endpoint), or that it doesn't. Everything is
 a guest path (anci owns all of them under `/var/lib/anci`, `/etc/anci`,
 `/var/log/anci`, plus the exe's configured `target`).
 
@@ -21,6 +22,7 @@ from ..conf import Conf
 from ..inspect.db import paths as db_paths
 from ..inspect.exe import paths as exe_paths
 from ..inspect.singletons import env_paths
+from ..render import litestream
 
 
 @dataclass
@@ -50,6 +52,13 @@ def _int(s: str) -> int | None:
     return int(s) if s.isdigit() else None
 
 
+def _replica_note(conf: Conf, env_name: str, db_name: str) -> str:
+    db = conf.dbs[db_name].resolve_for(env_name)
+    if db.replication is None:
+        return "replication off"
+    return f"replica: {litestream.replica_target(db)} at {db.replication.endpoint}"
+
+
 def _subjects(conf: Conf, env_name: str, kind: str | None,
               name: str | None) -> list[_Subject]:
     def exe_sub(n: str, shared: bool = True) -> _Subject:
@@ -57,7 +66,8 @@ def _subjects(conf: Conf, env_name: str, kind: str | None,
         return _Subject("exe", n, exe_paths(conf, env_name, n, shared=shared), schedule)
 
     def db_sub(n: str, shared: bool = True) -> _Subject:
-        return _Subject("db", n, db_paths(conf, env_name, n, shared=shared), None)
+        return _Subject("db", n, db_paths(conf, env_name, n, shared=shared),
+                        _replica_note(conf, env_name, n))
 
     if kind is not None and name is None:
         raise errors.ConfError(

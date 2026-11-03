@@ -113,7 +113,8 @@ def init(cwd: Path | None = None) -> int:
     if key:
         print(f"  using ssh key: {ui.dim(key[:40] + '...')}")
     else:
-        print(f"  {ui.yellow('note:')} no ssh key found — paste yours into anci.toml")
+        print(f"  {ui.yellow('note:')} no ssh key found — make one with `ssh-keygen -t ed25519`, "
+              f"then paste ~/.ssh/id_ed25519.pub into anci.toml")
 
     target.write_text(build_init_conf(name=name, source=source, ssh_key=key, user=user))
     print(f"\n  wrote {ui.bold('anci.toml')}")
