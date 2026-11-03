@@ -20,7 +20,7 @@ from .fakebox import FakeBox
 from .support import CONF, load_conf, write_source
 
 JOB = CONF.replace("[exe.app]\nsource = './app'\n", "[exe.app]\nsource = './app'\nschedule = 'daily'\n")
-REPLICATED = CONF + "\n[db.main-db.replication]\nbucket = 'backups'\n"
+REPLICATED = CONF + "\n[db.main-db.replication]\nbucket = 'backups'\nendpoint = 'https://s3.example.com'\naccess-key-env = 'S3_KEY'\nsecret-key-env = 'S3_SECRET'\n"
 TWO = CONF + "\n[exe.web]\nsource = './web'\n"
 # an x86_64 ELF header: what `deploy` (and so `plan`) checks a build can run on the box
 ELF = b"\x7fELF" + bytes([2, 1]) + b"\x00" * 12 + (62).to_bytes(2, "little")
@@ -310,7 +310,7 @@ class TestReplication(ApplyTest):
         self.assertTrue(self.box.path(layout.LITESTREAM_FILE).exists())
         self.assertNotIn("litestream.service", self.box.active())    # no db file yet
         self.assertEqual(self.box.path(layout.replica_record("main-db")).read_text(),
-                         " backups dev/main-db\n")
+                         "https://s3.example.com backups dev/main-db\n")
 
         self.box.path(layout.db_path("main-db")).write_text("")      # migrate created it
         self.converge(conf)

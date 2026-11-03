@@ -9,7 +9,7 @@ from anci.inspect.singletons import Caddy, Litestream, Logtrim, Secrets, Sshd
 
 from .support import CONF, load_conf
 
-REPLICATED = CONF + "\n[db.main-db.replication]\nbucket = 'backups'\n"
+REPLICATED = CONF + "\n[db.main-db.replication]\nbucket = 'backups'\nendpoint = 'https://s3.example.com'\naccess-key-env = 'S3_KEY'\nsecret-key-env = 'S3_SECRET'\n"
 
 
 def _matching(resource, conf) -> dict[str, list[str]]:

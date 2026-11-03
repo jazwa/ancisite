@@ -135,7 +135,7 @@ class TestCheck(unittest.TestCase):
 
     def test_every_resource_reports_only_what_it_declares(self):
         # an empty box, and a conf that turns every resource on
-        conf_text = (CONF + "\n[db.main-db.replication]\nbucket = 'backups'\n")
+        conf_text = (CONF + "\n[db.main-db.replication]\nbucket = 'backups'\nendpoint = 'https://s3.example.com'\naccess-key-env = 'S3_KEY'\nsecret-key-env = 'S3_SECRET'\n")
         with tempfile.TemporaryDirectory() as td:
             conf = load_conf(td, conf_text)
             with mock.patch.object(inspect.ssh, "facts", return_value={}):

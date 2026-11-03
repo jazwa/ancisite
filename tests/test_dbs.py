@@ -48,7 +48,7 @@ def make_conf(tmp: Path) -> Conf:
         dbs={"main-db": Db(
             name="main-db", migrations=str(mig_dir),
             extensions=[str(tmp / "ext.so")],
-            replication=Replication(bucket="backups"),
+            replication=Replication(bucket="backups", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET"),
         )},
     )
 
@@ -137,7 +137,7 @@ class TestRenderers(unittest.TestCase):
                 access_key_env="R2_ACCESS_KEY_ID", secret_key_env="R2_SECRET_ACCESS_KEY",
                 sync_interval="1s", retention="720h")),
             Db(name="analytics", migrations="/m", replication=Replication(
-                bucket="backups")),
+                bucket="backups", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET")),
         ]
         out = litestream.render_litestream_yaml(dbs_list)
         doc = json.loads(out)   # JSON is valid YAML
@@ -153,9 +153,12 @@ class TestRenderers(unittest.TestCase):
             "access-key-id": "${R2_ACCESS_KEY_ID}",
             "secret-access-key": "${R2_SECRET_ACCESS_KEY}",
             "sync-interval": "1s", "retention": "720h"}])
-        # a plain-AWS db renders no endpoint / region / key lines; path defaults to the name
+        # optional keys left out render nothing; path defaults to the name
         self.assertEqual(analytics["replicas"], [{"type": "s3", "bucket": "backups",
-                                                  "path": "analytics"}])
+                                                  "path": "analytics",
+                                                  "endpoint": "https://s3.example.com",
+                                                  "access-key-id": "${S3_KEY}",
+                                                  "secret-access-key": "${S3_SECRET}"}])
 
     def test_litestream_unit(self):
         unit = systemd.render_litestream_unit()
@@ -167,10 +170,10 @@ class TestRenderers(unittest.TestCase):
 
     def test_replica_target_is_bucket_slash_path(self):
         db = Db(name="x", migrations="/m",
-                replication=Replication(bucket="b", path="p"))
+                replication=Replication(bucket="b", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET", path="p"))
         self.assertEqual(litestream.replica_target(db), "b/p")
         self.assertEqual(litestream.replica_target(
-            Db(name="x", migrations="/m", replication=Replication(bucket="b"))), "b/x")
+            Db(name="x", migrations="/m", replication=Replication(bucket="b", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET"))), "b/x")
 
 
 class TestValidation(unittest.TestCase):
@@ -724,7 +727,7 @@ class TestRegenTimestamp(unittest.TestCase):
             envs={"dev": Env(name="dev", ip="127.0.0.1", access_users=["jack"],
                          anci_version="0.0.1")},
             exes={}, dbs={"main-db": Db(name="main-db", migrations="/m",
-                                        replication=Replication(bucket="b"))},
+                                        replication=Replication(bucket="b", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET"))},
         )
 
     def test_script_restores_latest_by_default(self):

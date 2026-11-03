@@ -241,7 +241,7 @@ sync-interval = '5s'
         self.assertIsNone(plain.dbs["plain"].replication)  # no subtable = off
 
     def test_bad_replication_is_refused_with_its_table_named(self):
-        repl = "\n[replication]\nbucket = 'b'\n[db.d]\nmigrations = './m'\n[db.d.replication]\n"
+        repl = "\n[replication]\nbucket = 'b'\nendpoint = 'https://s3.example.com'\naccess-key-env = 'K'\nsecret-key-env = 'S'\n[db.d]\nmigrations = './m'\n[db.d.replication]\n"
         for extra, fragment in (
             ("bucket = 3\n", "'bucket' must be a non-empty string"),
             ("bucket = 'my bucket'\n", "isn't a valid bucket name"),
@@ -258,6 +258,9 @@ sync-interval = '5s'
         conf = load_str(VALID + """
 [replication]
 bucket = 'my-bucket'
+endpoint = 'https://s3.example.com'
+access-key-env = 'S3_KEY'
+secret-key-env = 'S3_SECRET'
 
 [db.only-prod]
 migrations = './m'
@@ -293,6 +296,8 @@ path = 'prod/not-dev'
         conf = load_str(VALID + """
 [replication]
 bucket = 'my-bucket'
+access-key-env = 'S3_KEY'
+secret-key-env = 'S3_SECRET'
 endpoint = 'https://acct.r2.cloudflarestorage.com'
 region = 'us-east-1'
 
@@ -320,12 +325,13 @@ region = 'eu-west-1'
                     "[db.main-db.replication]\nsync-interval = '1s'",
             "'bucket' is required")
 
-    def test_replication_unpaired_env_names_rejected(self):
-        self.assert_conf_error(
-            VALID + "\n[db.main-db]\nmigrations = './m'\n"
-                    "[db.main-db.replication]\nbucket = 'b'\n"
-                    "access-key-env = 'R2_KEY'",
-            "go together")
+    def test_replication_key_env_names_required(self):
+        base = (VALID + "\n[db.main-db]\nmigrations = './m'\n"
+                        "[db.main-db.replication]\nbucket = 'b'\n")
+        self.assert_conf_error(base, "'endpoint' is required")
+        base += "endpoint = 'https://s3.example.com'\n"
+        self.assert_conf_error(base, "'access-key-env' is required")
+        self.assert_conf_error(base + "access-key-env = 'K'\n", "'secret-key-env' is required")
 
     def test_replication_bad_env_name_rejected(self):
         self.assert_conf_error(

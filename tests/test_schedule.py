@@ -327,7 +327,7 @@ class TestDbRegenTimers(unittest.TestCase):
             },
             dbs={"main-db": Db(
                 name="main-db", migrations=str(mig),
-                replication=Replication(bucket="backups"),
+                replication=Replication(bucket="backups", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET"),
             )},
         )
 

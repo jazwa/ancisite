@@ -39,15 +39,6 @@ git tag v1.2.3
 git push origin v1.2.3
 ```
 
-The `release` GitHub Actions workflow
-(`.github/workflows/release.yml`) then runs. It writes the tag's version into `anci/__init__.py` and
-`pyproject.toml` in its own copy of the repo (nothing is committed), runs `make release`, and creates a GitHub
-release for the tag with everything in `dist/release/` attached. `anci-install.sh` installs the latest release from
-there.
-
-The version in the repo itself stays a placeholder, so a local `make release` or `make build` reports that
-placeholder, not a real release number.
-
 If the workflow fails, commit the fix, then delete the tag and tag the new commit again:
 
 ```
@@ -59,41 +50,19 @@ git push origin :refs/tags/v1.2.3
 
 ### Setup
 
-Run `anci init` in your project to write a first `anci.toml`. It asks for your username, your app's name and the
-path to its binary (it looks in `target/release/` and a few other usual places), and picks up your ssh public key
-from `ssh-agent` or `~/.ssh/`. You get one user, a local `dev` env and one exe. `anci init` won't overwrite an
-existing `anci.toml`. See `example/anci.toml` for a fuller one.
-
+Run `anci init` in your project to write a first `anci.toml`. 
 Then:
 
 ```
 anci dev up               # provisions + boots the box (idempotent)
-anci dev deploy demo      # deploy a new version of your app (uses your ssh keys)
+anci dev deploy           # deploy a new version of your app(s) (uses your ssh keys)
 anci dev status           # this env: versions, state, URLs
 ```
 
 Handy verb: `anci dev logs demo` (your app's log file, `-f` follows).
 
-**Deploy**: `anci <env> deploy <exe>` ships your latest build of that exe, with its static files, and restarts it
-if anything changed. Leave out `<exe>` to deploy every exe. It also applies any other edits to `anci.toml`,
-secrets, `host` or replication, and stops exes you removed. It doesn't touch your databases (run
-`anci <env> migrate` first if the new code needs a new schema) or the VM's size (that's `up` or `reconcile`). To
-roll back, deploy the previous build. See [external-docs/deploy.md](external-docs/deploy.md).
-
-**Status**: `anci <env> status` shows each exe's version, state (`serving`, `failing`, `scheduled`, ...), URL and
-who deployed it last, each db's latest migration and how far its backup is behind, and the ssh command for the
-box. `--debug` also lists anything on the box that differs from `anci.toml`. See
-[external-docs/status.md](external-docs/status.md).
-
-The **env scopes every command** (`anci <env> <verb>`); `anci init` is the only
-top-level one.
-
-`anci dev down` stops the box (disk kept); `anci dev up --recreate` rebuilds it from
-scratch.
-
 **Secrets**: `anci <env> secrets` manages a SOPS-encrypted `envs/<env>/secrets.env` of `KEY=value` lines,
 safe to commit. `deploy`, `migrate` and `reconcile` send it to the env, and your app reads the values as env vars.
-For a quick local env, a git-ignored `.anci/secrets.<env>.env` works too.
 
 ### `anci.toml` quick reference
 
@@ -125,30 +94,40 @@ host = 'example.com'
 migrations = './migrations/'       # required
 extensions = ['./ext/foo.so']      # optional
 
-[replication]                      # optional: backup defaults shared by every db
-bucket = 'my-bucket'               # also: path, endpoint, region, access-key-env,
-                                   # secret-key-env, sync-interval, retention
-
-[db.<name>.replication]            # turns on backups for this db (may be empty)
 ```
 
 - Names (`<name>`, `<env>`) are lowercase letters, digits and `-`, starting with a letter, up to 32 characters.
-- Unknown keys are an error.
-- `vcpus` is 1–255, `mem` at least `512mb`, `disk` at least `4gb`.
 - A local env (`127.0.0.1`) can't have a `host`.
-- Each env runs at most 10 services (exes without a `schedule`).
 
-**Replication** backs up a db continuously to S3-compatible storage (AWS S3, Cloudflare R2, MinIO, B2, …) using
-litestream. Nothing replicates by default: `[replication]` only holds shared settings, and each db opts in with its
-own `[db.<name>.replication]` table, which can be empty to take every setting from `[replication]`.
+### Setting up replication
 
-- AWS S3 needs only `bucket`. Other stores also set `endpoint`, e.g. `'https://<account-id>.r2.cloudflarestorage.com'`.
-- `access-key-env` and `secret-key-env` are the *names* of env vars, set together, whose values you put in
-  `anci <env> secrets`. Leave both out to use the standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
-- Each db's backup goes under `<env>/<db>` in the bucket unless you set `path`.
-- Set `retention` (e.g. `'720h'` for 30 days): litestream keeps only 24 hours by default.
-- Per env: `[db.<name>.env.<env>.replication]` changes settings for one env, and `replication = false` under
-  `[db.<name>.env.<env>]` turns backups off there.
-- `anci <env> status` shows how far behind each backup is, and `anci <env> regen` restores from it.
+Replication backs up a db continuously to any S3-compatible storage using litestream. This is useful for disaster recovery.
 
-Full reference: [external-docs/robots.md](external-docs/robots.md#configuration-reference).
+1. Create a bucket and an access key for it with your storage provider.
+2. Add the bucket to `anci.toml`, and turn replication on for each db you want backed up:
+
+   ```toml
+   [replication]
+   bucket = 'my-bucket'
+   endpoint = 'https://<your-s3-endpoint>'
+   access-key-env = 'S3_ACCESS_KEY_ID'
+   secret-key-env = 'S3_SECRET_ACCESS_KEY'
+   retention = '720h'                    # optional: 24h by default
+   sync-interval = '60s'                 # optional: 1s by default
+
+   [db.main.replication]                 # enables replication on the db 
+   ```
+
+3. Put the key in the env's secrets with `anci prod secrets`, under the names you chose:
+
+   ```
+   S3_ACCESS_KEY_ID=...
+   S3_SECRET_ACCESS_KEY=...
+   ```
+
+4. Run `anci prod migrate` (or `deploy`, or `reconcile`). Backups start once the db exists.
+5. Check `anci prod status`: each db shows how far behind its backup is, e.g. `2s since last sync`.
+
+Each db's backup goes under `<env>/<db>` in the bucket. To restore, run `anci prod regen <db>` (see
+[external-docs/regen.md](external-docs/regen.md)). To turn backups off on one env, put `replication = false` under
+`[db.<name>.env.<env>]`.

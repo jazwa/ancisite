@@ -302,7 +302,10 @@ litestream stays running when it can't reach the bucket: note what you see.
 bucket = 'anci-test'
 path = 'dev/main'
 endpoint = 'http://127.0.0.1:9000'
+access-key-env = 'S3_ACCESS_KEY_ID'
+secret-key-env = 'S3_SECRET_ACCESS_KEY'
 ```
+Put dummy values for both in `.anci/secrets.dev.env`, or anci refuses to apply it.
 - **12a. Plan**: `+ litestream`, `~ db.main  replica: none → http://127.0.0.1:9000 anci-test dev/main`.
   **Box**: `/etc/anci/litestream.yaml` exists, `litestream.service` is linked and in
   `multi-user.target.wants`, and `main replica=[http://127.0.0.1:9000 anci-test dev/main]`.

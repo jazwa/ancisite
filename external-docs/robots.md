@@ -130,6 +130,9 @@ migrations = './migrations/'          # SQL files, applied in order
 
 [db.main-db.replication]              # optional: continuous backup (s3-compatible)
 bucket = 'my-bucket'
+endpoint = 'https://s3.example.com'
+access-key-env = 'S3_ACCESS_KEY_ID'   # env var names; the values go in `anci <env> secrets`
+secret-key-env = 'S3_SECRET_ACCESS_KEY'
 ```
 
 ## Configuration reference
@@ -316,18 +319,17 @@ extensions = ['./ext/uuid.so']       # optional: sqlite extensions
 
 ### `[replication]` / `[db.<name>.replication]` — continuous backups
 
-Replication is **s3-compatible storage only** (AWS S3, Cloudflare R2, MinIO,
-Backblaze B2, …) via [litestream](https://litestream.io). A db with a
+Replication goes to **s3-compatible storage** via [litestream](https://litestream.io). A db with a
 `[db.<name>.replication]` table is backed up continuously; a db without one
 isn't.
 
 ```toml
 [replication]                                     # shared defaults — nothing replicates by itself
 bucket = 'my-bucket'
-endpoint = 'https://<account-id>.r2.cloudflarestorage.com'   # optional: non-AWS S3-compatible stores
-region = 'us-east-1'                              # optional: signing region (AWS auto-discovers when unset)
-access-key-env = 'R2_ACCESS_KEY_ID'               # optional, paired: env var *names*
-secret-key-env = 'R2_SECRET_ACCESS_KEY'           #   (see below)
+endpoint = 'https://s3.example.com'              # your store's URL
+access-key-env = 'S3_ACCESS_KEY_ID'               # env var *names* (see below)
+secret-key-env = 'S3_SECRET_ACCESS_KEY'
+region = 'us-east-1'                              # optional: signing region, if your store wants one
 sync-interval = '1s'                              # optional: how often the WAL ships (default 1s)
 retention = '720h'                                # optional: how long replica data is kept (default 24h!)
 
@@ -337,19 +339,14 @@ path = 'main-db'             # optional: key prefix in the bucket (defaults to <
 [db.sessions.replication]    # opt-in another db: one line is enough
 ```
 
-- **AWS S3 needs only `bucket`** — no endpoint, no key config. Anything else
-  (R2, MinIO, B2, …) sets `endpoint`; litestream uses path-style addressing
-  automatically for those.
-- `region` is optional: AWS signs and locates the bucket without it (litestream
-  looks the bucket's region up on startup), but setting it skips that lookup and
-  works on locked-down networks. S3-compatible stores that validate a signing
-  region (R2's `auto`, some MinIO/B2 setups) may want it explicitly.
-- **Credentials come from the secrets file by env-var name.** Put the value in
+- `bucket`, `endpoint`, `access-key-env` and `secret-key-env` are required. Each
+  can be set in `[replication]` or in the db's own table.
+- **Credentials come from the secrets file by env-var name.** Put the values in
   `anci <env> secrets` (or your plaintext `.anci/…` file) under the
- variables you named — here `R2_ACCESS_KEY_ID=…` / `R2_SECRET_ACCESS_KEY=…`.
+  variables you named — here `S3_ACCESS_KEY_ID=…` / `S3_SECRET_ACCESS_KEY=…`.
   They're injected into the litestream service like your app's env vars, and
-  the config references them as `${R2_ACCESS_KEY_ID}`. Leave both keys unset to
-  use the standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` chain.
+  the config references them as `${S3_ACCESS_KEY_ID}`. Until the secrets have
+  them, every `anci <env>` command except `secrets` refuses to run.
 - Two dbs, or two envs, into the same bucket don't clash: each replica gets its
   own prefix (`<env>/<db>`, unless you set `path`).
 - **Per env:** `[db.<name>.env.<env>.replication]` replicates the db only on
@@ -435,8 +432,8 @@ plaintext `.anci/…` file is git-ignored.
 
 Every db with a `[db.<name>.replication]` table is replicated continuously: one
 litestream unit per box streams each SQLite file's WAL to an S3-compatible
-store. Credentials ride the secrets file under the env-var names you chose (the
-default is the `AWS_*` chain). `anci <env> status` shows the replication lag
+store. Credentials ride the secrets file under the env-var names you chose.
+`anci <env> status` shows the replication lag
 per db — e.g. `2s since last sync`; if the replica store has nothing yet it
 shows how far a restore would fall short.
 

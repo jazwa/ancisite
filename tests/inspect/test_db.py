@@ -14,7 +14,7 @@ from .support import CONF, load_conf
 from .support import link, run_probes, write
 
 EXT = CONF.replace("migrations = './m'\n", "migrations = './m'\nextensions = ['./ext/uuid.so']\n")
-REPLICATED = CONF + "\n[db.main-db.replication]\nbucket = 'backups'\n"
+REPLICATED = CONF + "\n[db.main-db.replication]\nbucket = 'backups'\nendpoint = 'https://s3.example.com'\naccess-key-env = 'S3_KEY'\nsecret-key-env = 'S3_SECRET'\n"
 
 
 class TestDb(unittest.TestCase):
@@ -51,7 +51,7 @@ class TestDb(unittest.TestCase):
     def test_a_replica_that_moved(self):
         write(layout.replica_record("main-db"), " backups old/main-db\n")
         [change] = self._diff(load_conf(self.root, REPLICATED))
-        self.assertEqual(change.fields, {"replica": (" backups old/main-db", " backups dev/main-db")})
+        self.assertEqual(change.fields, {"replica": (" backups old/main-db", "https://s3.example.com backups dev/main-db")})
 
     def test_replication_turned_off_leaves_its_record(self):
         write(layout.replica_record("main-db"), " backups dev/main-db\n")

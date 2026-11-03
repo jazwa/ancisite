@@ -51,6 +51,9 @@ migrations = './m'
 
 [db.guests.replication]
 bucket = 'guests-backups'
+endpoint = 'https://s3.example.com'
+access-key-env = 'S3_KEY'
+secret-key-env = 'S3_SECRET'
 """
 
 UNIT_SHA = "a" * 64
@@ -65,7 +68,7 @@ def load_in(directory: str, text: str = CONF):
 
 
 def make_conf(replication: "Replication | None" =
-              Replication(bucket="guests-backups")) -> Conf:
+              Replication(bucket="guests-backups", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET")) -> Conf:
     return Conf(
         users={"jack": User(name="jack", ssh_pub_keys=["k"])},
         envs={"dev": Env(name="dev", ip="127.0.0.1", access_users=["jack"],
@@ -259,7 +262,7 @@ class TestReplicationCell(unittest.TestCase):
     def test_destination_is_the_resolved_replica_target(self):
         self.assertEqual(status._destination_cell(make_conf(), "dev", "guests"),
                          "guests-backups/dev/guests")                   # <env>/<db> default
-        explicit = make_conf(replication=Replication(bucket="b", path="p"))
+        explicit = make_conf(replication=Replication(bucket="b", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET", path="p"))
         self.assertEqual(status._destination_cell(explicit, "dev", "guests"), "b/p")
         self.assertEqual(status._destination_cell(make_conf(replication=None), "dev", "guests"), "—")
 

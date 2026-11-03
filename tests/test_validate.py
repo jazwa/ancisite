@@ -26,6 +26,7 @@ source = './bin/server'
 
 [replication]
 bucket = 'my-bucket'
+endpoint = 'https://s3.example.com'
 access-key-env = 'R2_ACCESS_KEY_ID'
 secret-key-env = 'R2_SECRET_ACCESS_KEY'
 
@@ -34,11 +35,6 @@ migrations = './m'
 
 [db.main-db.replication]
 """
-
-NO_CREDS = CONF.replace(
-    "access-key-env = 'R2_ACCESS_KEY_ID'\n", ""
-).replace("secret-key-env = 'R2_SECRET_ACCESS_KEY'\n", "")
-
 
 class TestValidateEnv(unittest.TestCase):
     def _conf(self, directory: str, text: str = CONF):
@@ -81,11 +77,6 @@ class TestValidateEnv(unittest.TestCase):
             d = Path(td) / "envs" / "dev"
             d.mkdir(parents=True)
             (d / "secrets.env").write_text("ENC[AES256_GCM,data:...]")
-            validate.validate_env(conf, "dev")  # must not raise
-
-    def test_default_chain_needs_no_secrets(self):
-        with tempfile.TemporaryDirectory() as td:
-            conf = self._conf(td, NO_CREDS)
             validate.validate_env(conf, "dev")  # must not raise
 
     def test_unknown_env_is_a_noop(self):

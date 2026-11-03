@@ -11,8 +11,8 @@ Design points:
   app is pointed at that directory, and an extension dropped from the conf is
   pruned from it — by the same apply pass every verb ends in (`anci/inspect/`)
 - litestream is a pinned binary pushed like any artifact; one unit per env,
-  one yaml listing all of that env's dbs; replicas are s3-compatible
-  stores only (AWS S3, or anything else via its endpoint — R2, MinIO, …)
+  one yaml listing all of that env's dbs; replicas go to an s3-compatible
+  store, named by its endpoint
 - secrets: you keep `.anci/secrets.<env>.env` locally (git-ignored); anci is a
   courier — it uploads the file mode 600 if present
 """

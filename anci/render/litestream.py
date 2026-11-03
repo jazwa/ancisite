@@ -20,14 +20,12 @@ def replica_target(db) -> str:
 def render_litestream_yaml(dbs: list) -> str:
     def replica(db) -> dict:
         r = db.replication
-        out = {"type": "s3", "bucket": r.bucket, "path": r.path or db.name}
-        if r.endpoint:
-            out["endpoint"] = r.endpoint
+        out = {"type": "s3", "bucket": r.bucket, "path": r.path or db.name,
+               "endpoint": r.endpoint}
         if r.region:
             out["region"] = r.region
-        if r.access_key_env and r.secret_key_env:
-            out["access-key-id"] = f"${{{r.access_key_env}}}"
-            out["secret-access-key"] = f"${{{r.secret_key_env}}}"
+        out["access-key-id"] = f"${{{r.access_key_env}}}"
+        out["secret-access-key"] = f"${{{r.secret_key_env}}}"
         if r.sync_interval:
             out["sync-interval"] = r.sync_interval
         if r.retention:

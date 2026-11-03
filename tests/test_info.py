@@ -27,7 +27,7 @@ def make_conf() -> Conf:
                        schedule="daily", env_overrides={"dev": ExeOverride(env="dev")}),
         },
         dbs={"main-db": Db(name="main-db", migrations="./m/", extensions=["./ext/vec0.so"],
-                           replication=Replication(bucket="backups"))},
+                           replication=Replication(bucket="backups", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET"))},
     )
 
 

@@ -18,7 +18,7 @@ def _conf(replication=True) -> Conf:
                          anci_version="0.0.1")},
         exes={"app": Exe(name="app", source="./s")},
         dbs={"main": Db(name="main", migrations="./m",
-                        replication=Replication(bucket="b", path="p") if replication else None)},
+                        replication=Replication(bucket="b", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET", path="p") if replication else None)},
     )
 
 
@@ -142,7 +142,7 @@ class TestRegenAll(unittest.TestCase):
 
     def _conf(self):
         conf = _conf()
-        conf.dbs["aux"] = Db(name="aux", migrations="./m", replication=Replication(bucket="b"))
+        conf.dbs["aux"] = Db(name="aux", migrations="./m", replication=Replication(bucket="b", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET"))
         conf.dbs["cache"] = Db(name="cache", migrations="./m")          # not replicated
         return conf
 

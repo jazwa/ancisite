@@ -273,7 +273,7 @@ class TestMechUnits(unittest.TestCase):
                              env_overrides={"dev": ExeOverride(env="dev", host="dev.example.com")})},
             dbs={"main-db": Db(
                 name="main-db", migrations="./m/",
-                replication=Replication(bucket="backups"),
+                replication=Replication(bucket="backups", endpoint="https://s3.example.com", access_key_env="S3_KEY", secret_key_env="S3_SECRET"),
             )},
         )
         return conf

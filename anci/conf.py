@@ -117,11 +117,11 @@ class ResolvedExe:
 class Replication:
 
     bucket: str
+    endpoint: str
+    access_key_env: str
+    secret_key_env: str
     path: str | None = None
-    endpoint: str | None = None
     region: str | None = None
-    access_key_env: str | None = None
-    secret_key_env: str | None = None
     sync_interval: str | None = None
     retention: str | None = None
 
@@ -422,16 +422,11 @@ def _parse_replication(raw: dict, defaults: dict, ctx: str) -> Replication:
     endpoint = merged.get("endpoint")
     access_key_env = merged.get("access-key-env")
     secret_key_env = merged.get("secret-key-env")
-    if (access_key_env is None) != (secret_key_env is None):
-        raise ConfError(
-            f"{ctx}: 'access-key-env' and 'secret-key-env' go together "
-            f"(the store needs both, or neither)"
-        )
     for key in ("access-key-env", "secret-key-env", "path", "endpoint", "region"):
         _opt_str(merged, key, ctx)
     if endpoint is not None and not endpoint.startswith(("https://", "http://")):
         raise ConfError(f"{ctx}: 'endpoint' must be a URL starting with https:// "
-                        f"(e.g. 'https://<account-id>.r2.cloudflarestorage.com')")
+                        f"(e.g. 'https://s3.example.com')")
     path = merged.get("path")
     if path is not None and (path.startswith("/") or path.endswith("/")
                              or any(seg in ("", ".", "..") for seg in path.split("/"))):
@@ -449,6 +444,19 @@ def _parse_replication(raw: dict, defaults: dict, ctx: str) -> Replication:
             raise ConfError(
                 f"{ctx}: '{field_name}' must be a Go duration "
                 f"(e.g. '1s', '5m', '24h', '720h')"
+            )
+    for key, why in (
+        ("endpoint", "it's your S3-compatible store's URL"),
+        ("access-key-env", "it names the env var holding the access key ID; "
+                           "put the value in `anci <env> secrets`"),
+        ("secret-key-env", "it names the env var holding the secret access key; "
+                           "put the value in `anci <env> secrets`"),
+    ):
+        if merged.get(key) is None:
+            raise ConfError(
+                f"{ctx}: '{key}' is required "
+                f"(set it in [replication] or in {ctx})",
+                why=why,
             )
     return Replication(
         bucket=bucket,

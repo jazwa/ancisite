@@ -89,16 +89,16 @@ with the base table; the rest replace it. The env has to exist.
 Shared backup settings. On its own it backs up nothing; a db needs its own `[db.<name>.replication]`.
 
 Settings are layered: `[replication]`, then `[db.<name>.replication]`, then `[db.<name>.env.<env>.replication]`.
-The same keys work in all three.
+The same keys work in all three, and a required key can be set in any of them.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `bucket` | string | | Required somewhere in the layers. No spaces or `/`. |
+| `bucket` | string | | Required. No spaces or `/`. |
 | `path` | string | `<env>/<db>` | Key prefix in the bucket. No leading or trailing `/`, no `.` or `..`. |
-| `endpoint` | URL | AWS S3 | Needed for anything that isn't AWS, e.g. `'https://<account-id>.r2.cloudflarestorage.com'`. |
-| `region` | string | looked up | |
-| `access-key-env` | env var name | `AWS_ACCESS_KEY_ID` | Set both or neither. The values go in `anci <env> secrets`. |
-| `secret-key-env` | env var name | `AWS_SECRET_ACCESS_KEY` | |
+| `endpoint` | URL | | Required. Your store's URL, `https://` or `http://`. |
+| `access-key-env` | env var name | | Required. Name of the env var holding the access key ID. The value goes in `anci <env> secrets`. |
+| `secret-key-env` | env var name | | Required. Same, for the secret access key. |
+| `region` | string | | Signing region, if your store wants one. |
 | `sync-interval` | Go duration | `'1s'` | e.g. `'5m'`. |
 | `retention` | Go duration | `'24h'` | You probably want longer, e.g. `'720h'` (30 days). |
 

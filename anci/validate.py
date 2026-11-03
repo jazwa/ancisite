@@ -183,7 +183,7 @@ def validate_env(conf: "Conf", env_name: str) -> None:
     missing: dict[tuple[str, ...], list[str]] = {}
     for db in sorted(conf.dbs.values(), key=lambda d: d.name):
         rep = db.resolve_for(env_name).replication
-        if rep is None or not (rep.access_key_env and rep.secret_key_env):
+        if rep is None:
             continue
         names = {rep.access_key_env, rep.secret_key_env}
         if not _secrets_provide(conf, env_name, names):
