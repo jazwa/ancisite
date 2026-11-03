@@ -54,12 +54,12 @@ Run `anci init` in your project to write a first `anci.toml`.
 Then:
 
 ```
-anci dev up               # provisions + boots the box (idempotent)
-anci dev deploy           # deploy a new version of your app(s) (uses your ssh keys)
-anci dev status           # this env: versions, state, URLs
+anci <env> up               # provisions + boots the box (idempotent)
+anci <env> deploy           # deploy a new version of your app(s) (uses your ssh keys)
+anci <env> status           # this env: versions, state, URLs
 ```
 
-Handy verb: `anci dev logs demo` (your app's log file, `-f` follows).
+Handy verb: `anci <env> logs demo` (your app's log file, `-f` follows).
 
 **Secrets**: `anci <env> secrets` manages a SOPS-encrypted `envs/<env>/secrets.env` of `KEY=value` lines,
 safe to commit. `deploy`, `migrate` and `reconcile` send it to the env, and your app reads the values as env vars.
@@ -73,7 +73,7 @@ anci-version = '0.0.1'             # optional: default for every env's vm.anci-v
 ssh-pub-keys = 'ssh-ed25519 …'     # one key or a list
 
 [env.<name>]
-ip = '127.0.0.1'                   # 127.0.0.1 = a VM on this machine
+ip = '127.0.0.1'                   # ip of the actual machine running the anci vm.
 access-users = ['<user>']          # which [user.*] can deploy here
 mode = 'full'                      # optional: 'full' (anci runs the VM) or 'adopt' (an existing box)
 port = 22                          # optional: the box's sshd port
@@ -118,16 +118,16 @@ Replication backs up a db continuously to any S3-compatible storage using litest
    [db.main.replication]                 # enables replication on the db 
    ```
 
-3. Put the key in the env's secrets with `anci prod secrets`, under the names you chose:
+3. Put the key in the env's secrets with `anci <env> secrets`, under the names you chose:
 
    ```
    S3_ACCESS_KEY_ID=...
    S3_SECRET_ACCESS_KEY=...
    ```
 
-4. Run `anci prod migrate` (or `deploy`, or `reconcile`). Backups start once the db exists.
-5. Check `anci prod status`: each db shows how far behind its backup is, e.g. `2s since last sync`.
+4. Run `anci <env> migrate` (or `deploy`, or `reconcile`). Backups start once the db exists.
+5. Check `anci <env> status`: each db shows how far behind its backup is, e.g. `2s since last sync`.
 
-Each db's backup goes under `<env>/<db>` in the bucket. To restore, run `anci prod regen <db>` (see
+Each db's backup goes under `<env>/<db>` in the bucket. To restore, run `anci <env> regen <db>` (see
 [external-docs/regen.md](external-docs/regen.md)). To turn backups off on one env, put `replication = false` under
 `[db.<name>.env.<env>]`.
