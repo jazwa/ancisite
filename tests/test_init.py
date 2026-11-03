@@ -9,10 +9,10 @@ class TestBuildInitConf(unittest.TestCase):
     def test_contains_all_sections(self):
         conf = build_init_conf(
             name="blog", source="./target/release/blog",
-            ssh_key="ssh-ed25519 AAAA me", user="jack",
+            ssh_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfe6f8f66008145931ca3483cf80e71d3d6431ed09e1 me", user="jack",
         )
         self.assertIn("[user.jack]", conf)
-        self.assertIn("ssh-ed25519 AAAA me", conf)
+        self.assertIn("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfe6f8f66008145931ca3483cf80e71d3d6431ed09e1 me", conf)
         self.assertIn("[env.dev]", conf)
         self.assertIn("ip = '127.0.0.1'", conf)
         self.assertIn("access-users = ['jack']", conf)
@@ -47,7 +47,7 @@ class TestBuildInitConf(unittest.TestCase):
     def test_fallback_source_comment_is_not_inside_the_quotes(self):
         # regression: the "TODO: build first" note used to be embedded in the
         # quoted value, making the generated source path unusable
-        conf = build_init_conf(name="blog", source=None, ssh_key="ssh-ed25519 AAAA me")
+        conf = build_init_conf(name="blog", source=None, ssh_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfe6f8f66008145931ca3483cf80e71d3d6431ed09e1 me")
         import re
         import tempfile
 
@@ -78,13 +78,15 @@ class TestDetectSource(unittest.TestCase):
 
 
 class TestNormalizeName(unittest.TestCase):
-    def test_normalizes_to_a_toml_bare_key(self):
-        self.assertEqual(normalize_name("Jack Smith", "you"), "jack_smith")
-        self.assertEqual(normalize_name("my-app", "you"), "my_app")
+    def test_normalizes_to_a_name_the_conf_accepts(self):
+        self.assertEqual(normalize_name("Jack Smith", "you"), "jack-smith")
+        self.assertEqual(normalize_name("my_app", "you"), "my-app")
         self.assertEqual(normalize_name("  Blog  ", "you"), "blog")
+        self.assertEqual(normalize_name("x" * 40, "you"), "x" * 32)
 
-    def test_empty_falls_back(self):
+    def test_empty_or_unusable_falls_back(self):
         self.assertEqual(normalize_name("   ", "you"), "you")
+        self.assertEqual(normalize_name("2048", "you"), "you")
 
 
 class TestInitCommand(unittest.TestCase):
@@ -117,7 +119,7 @@ class TestInitCommand(unittest.TestCase):
                  mock.patch("builtins.input",
                             side_effect=["jack", "blog", ""]) as ask, \
                  mock.patch.object(init_mod, "detect_ssh_key",
-                                   return_value="ssh-ed25519 AAAA me"):
+                                   return_value="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIfe6f8f66008145931ca3483cf80e71d3d6431ed09e1 me"):
                 rc = init_mod.init(cwd)
             self.assertEqual(rc, 0)
             conf = (cwd / "anci.toml").read_text()

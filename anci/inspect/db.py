@@ -16,13 +16,11 @@ from .singletons import Litestream, litestream_restart
 
 
 def record_target(db) -> str:
-    """Where a db's replica lives — the identity litestream's local state belongs to."""
     r = db.replication
     return f"{r.endpoint or ''} {r.bucket} {r.path}"
 
 
 def extension_files(conf, db) -> list:
-    """The db's extension files on this machine; fails on a missing one."""
     files = []
     for ext in db.extensions:
         p = conf_path(conf, ext)
@@ -37,8 +35,6 @@ def extension_files(conf, db) -> list:
 
 
 def prune_script(ext_dir: str, keep: list[str]) -> str:
-    """Drop any entry in `ext_dir` that isn't a listed extension (so a removed one
-    doesn't linger on the box, and thus in the app's EXT_DIR)."""
     guard = "".join(f" ! -name {shlex.quote(n)}" for n in keep)
     return (f"[ -d {shlex.quote(ext_dir)} ] && "
             f"find {shlex.quote(ext_dir)} -mindepth 1 -maxdepth 1{guard} "
@@ -46,8 +42,6 @@ def prune_script(ext_dir: str, keep: list[str]) -> str:
 
 
 def paths(conf, env_name: str, db_name: str, *, shared: bool = True) -> list[tuple[str, str]]:
-    """Where a db's files live on the box, and what each is (`anci info`).
-    `shared`: also the env-wide files it uses (replication's, the secrets)."""
     db = conf.dbs[db_name]
     data = layout.db_path(db_name)
     rows = [(data, "database"), (f"{data}-wal", "write-ahead log"), (f"{data}-shm", "WAL index")]
@@ -63,9 +57,6 @@ def paths(conf, env_name: str, db_name: str, *, shared: bool = True) -> list[tup
 
 
 def migration_setup(names: list[str]):
-    """What `migrate` applies before its migrations run, as a converge's
-    `select`: these dbs' own changes (dirs, extensions — one may be `.load`ed),
-    and sqlite3, which runs them."""
     wanted = {f"db.{n}" for n in names}
 
     def select(changes: list[Change]) -> list[Change]:
@@ -81,14 +72,13 @@ def migration_setup(names: list[str]):
 
 class Db(Resource):
     name = "db"
-    # `exists` (the db file) is read, never compared: the target leaves it out
     fields = frozenset({"exts", "replica", "exists"})
     rows = {"CREATE": "create", "DELETE": "forget", "exts": "exts", "replica": "replica"}
-    kept_when_removed = True     # anci never deletes a db's data
+    kept_when_removed = True
     rules = (
-        ("litestream/stop", "db.*/reset-replica"),   # a replica's local state is reset while
-        ("db.*/reset-replica", "litestream/start"),  # litestream is stopped
-        ("db.*/dirs", "*/restart"),                  # an app's writable db dirs exist before it starts
+        ("litestream/stop", "db.*/reset-replica"),
+        ("db.*/reset-replica", "litestream/start"),
+        ("db.*/dirs", "*/restart"),
         ("db.*/dirs", "*/arm"),
     )
 
@@ -108,11 +98,10 @@ class Db(Resource):
 
     def probes(self):
         d, x = layout.DB_DIR, layout.EXT_DIR
-        record = os.path.basename(layout.replica_record(""))   # its name inside a db dir
+        record = os.path.basename(layout.replica_record(""))
         db_file = os.path.basename(layout.db_path(""))
         return {
             "dirs": f"ls -1 {d}",
-            # resolved (-e): an extension whose blob is gone reads as missing
             "exts": f'cd {x} && for f in */*; do [ -L "$f" ] && echo "$f $(readlink -e "$f")"; done',
             "replica": f'cd {d} && for d in *; do [ -f "$d/{record}" ] && echo "$d $(cat "$d/{record}")"; done',
             "files": f'cd {d} && for d in *; do [ -f "$d/{db_file}" ] && echo "$d"; done',
@@ -131,13 +120,12 @@ class Db(Resource):
             for name in layout.split_safe(found["dirs"])[0]
         }
 
-    # -- steps
 
     def steps(self, change, ctx):
         name = change.identifier.split(".", 1)[1]
         rows = self.rows_for(change)
         if "forget" in rows:
-            return []    # the data stays
+            return []
         want = ctx.target[change.identifier]
         out = []
         if "create" in rows:
@@ -153,8 +141,6 @@ class Db(Resource):
 
 
 def _exts(ctx, name: str) -> Step:
-    """Each extension to the blob store, linked into the db's ext dir by name;
-    any other entry there is removed."""
     files = extension_files(ctx.conf, ctx.conf.dbs[name].resolve_for(ctx.env_name))
     ext_dir = layout.ext_dir(name)
     lines = [link(f"{ext_dir}/{p.name}", ctx.uploads.blob(p, sha256_file(p))) for p in files]
@@ -163,15 +149,10 @@ def _exts(ctx, name: str) -> Step:
 
 
 def drop_litestream_state(name: str) -> str:
-    """Root shell, while litestream is stopped: drop a db's local litestream
-    state (it belongs to another file or replica; litestream starts afresh)."""
     return f"rm -rf {shlex.quote(layout.litestream_state_dir(name))}"
 
 
 def _reset_replica(name: str, target: str | None) -> Step:
-    """While litestream is stopped: drop the db's local litestream state (it
-    belongs to the old replica; litestream starts the new one from a fresh
-    snapshot) and record the new target — or no record, with replication off."""
     q = shlex.quote
     record = q(layout.replica_record(name))
     lines = [drop_litestream_state(name)]

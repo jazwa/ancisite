@@ -22,8 +22,8 @@ from datetime import datetime, timezone
 from .layout import ANCI_GROUP, RELEASES_DIR
 
 
-RELEASES_MAX = 16384    # trim when the log reaches this many lines…
-RELEASES_KEPT = 8192    # …down to the newest this many
+RELEASES_MAX = 16384
+RELEASES_KEPT = 8192
 
 
 def release_file(exe_name: str) -> str:
@@ -32,7 +32,6 @@ def release_file(exe_name: str) -> str:
 
 def append_script(exe_name: str, *, env: str, blob: str, source: str, user: str,
                   static: str | None = None) -> str:
-    """Root shell appending one release record (run once the exe's links moved)."""
     record = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "env": env,
@@ -43,13 +42,10 @@ def append_script(exe_name: str, *, env: str, blob: str, source: str, user: str,
     if static is not None:
         record["static"] = static
     line = json.dumps(record, separators=(",", ":"))
-    # root-owned, in a setgid group-writable dir: any deployer (all have
-    # passwordless sudo) can append; ownership doesn't depend on who deployed
     f = shlex.quote(release_file(exe_name))
     return (
         f"install -d -o root -g {ANCI_GROUP} -m 2775 {RELEASES_DIR}/{exe_name} && "
         f"echo {shlex.quote(line)} >> {f} && "
-        # trim in batches; rewritten in place, so the file keeps its owner/mode
         f'if [ "$(wc -l < {f})" -ge {RELEASES_MAX} ]; then '
         f"tail -n {RELEASES_KEPT} {f} > {f}.tmp && cat {f}.tmp > {f} && rm -f {f}.tmp; fi"
     )

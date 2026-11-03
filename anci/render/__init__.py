@@ -22,7 +22,6 @@ _PLACEHOLDER = re.compile(r"@[A-Z_]+@")
 
 
 def template(name: str, **values: str) -> str:
-    """`files/<name>` with each `@KEY@` replaced by `values[KEY]`."""
     text = resources.files(__package__).joinpath("files", name).read_text()
     for key, value in values.items():
         text = text.replace(f"@{key}@", value)

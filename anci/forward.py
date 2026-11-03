@@ -35,10 +35,10 @@ from .conf import Conf, allocate_ports
 from .render.fwd import APPLY_SCRIPT, FWD_DIR, HOOK_FILE, render_apply_script, render_hook, render_ruleset
 
 BASE = 20000
-GROUP_SIZE = 10      # = allocate_ports' max exes per env: one port per slot
+GROUP_SIZE = 10
 GROUPS = 100
-CANARY_BASE = 21000  # + the env's group → the VM's sshd (see healthy)
-APP_BASE, APP_STRIDE = 8000, 10   # allocate_ports' defaults
+CANARY_BASE = 21000
+APP_BASE, APP_STRIDE = 8000, 10
 
 _GROUP_RE = re.compile(r"^# group (\d+)$", re.M)
 _BRIDGE_RE = re.compile(r"^# bridge (\S+)$", re.M)
@@ -69,7 +69,6 @@ def _group_of(path: Path) -> int | None:
 
 
 def group(conf: Conf, env_name: str, fwd_dir: str = FWD_DIR) -> int:
-    """The env's port group: the one its ruleset records, else the lowest free one."""
     mine = ruleset_path(conf, env_name, fwd_dir)
     own = _group_of(mine)
     if own is not None:
@@ -87,18 +86,15 @@ def group(conf: Conf, env_name: str, fwd_dir: str = FWD_DIR) -> int:
 
 
 def _slots(conf: Conf, env_name: str) -> dict[str, int]:
-    """exe -> its app port slot (0–9) on the VM."""
     return {exe: (port - APP_BASE) // APP_STRIDE
             for (exe, env), port in allocate_ports(conf).items() if env == env_name}
 
 
 def ports_for(conf: Conf, env_name: str, grp: int) -> dict[str, int]:
-    """exe -> its localhost port, for the env's port group."""
     return {exe: BASE + grp * GROUP_SIZE + slot for exe, slot in _slots(conf, env_name).items()}
 
 
 def installed_ports(conf: Conf, env_name: str, fwd_dir: str = FWD_DIR) -> dict[str, int]:
-    """exe -> localhost port as installed, or {} when the env has no forward yet."""
     if not conf.envs[env_name].local:
         return {}
     grp = _group_of(ruleset_path(conf, env_name, fwd_dir))
@@ -106,7 +102,6 @@ def installed_ports(conf: Conf, env_name: str, fwd_dir: str = FWD_DIR) -> dict[s
 
 
 def _bridge(vm_ip: str) -> str:
-    """The interface this machine reaches the VM through (libvirt's bridge)."""
     try:
         out = subprocess.run(["ip", "-o", "route", "get", vm_ip],
                              capture_output=True, text=True).stdout
@@ -117,7 +112,6 @@ def _bridge(vm_ip: str) -> str:
 
 
 def desired(conf: Conf, env_name: str, grp: int) -> dict[str, tuple[str, str]]:
-    """path -> (content, mode) for the env's forward."""
     vm_ip = box.resolve_env_ip(conf, env_name)
     forwards = [(BASE + grp * GROUP_SIZE + slot, APP_BASE + APP_STRIDE * slot)
                 for slot in range(GROUP_SIZE)] + [(CANARY_BASE + grp, 22)]
@@ -138,11 +132,6 @@ def _connects(host: str, port: int) -> bool:
 
 
 def healthy(conf: Conf, env_name: str, fwd_dir: str = FWD_DIR) -> bool | None:
-    """Whether the env's forward is loaded in the kernel — True, False, or None
-    when it can't be told (no forward installed, or the VM is down). Listing nft
-    needs root, so: the route_localnet sysctl the apply script sets once the table
-    loads (a reboot clears it), then the canary port, which reaches the VM's sshd
-    only through the forward (a flushed ruleset fails it)."""
     ruleset = _read(ruleset_path(conf, env_name, fwd_dir))
     grp = _group_of(ruleset_path(conf, env_name, fwd_dir))
     m = _BRIDGE_RE.search(ruleset or "")
@@ -152,21 +141,15 @@ def healthy(conf: Conf, env_name: str, fwd_dir: str = FWD_DIR) -> bool | None:
         return False
     if _connects("127.0.0.1", CANARY_BASE + grp):
         return True
-    # the canary failed: a broken forward if the VM answers directly, else the VM is down
     return False if _connects(box.resolve_env_ip(conf, env_name), 22) else None
 
 
 def _have_nft() -> bool:
-    # root's tools often live in sbin, which a user's PATH may lack
     path = os.environ.get("PATH", "") + ":/usr/sbin:/sbin:/usr/local/sbin"
     return shutil.which("nft", path=path) is not None
 
 
 def reconcile(conf: Conf, env_name: str) -> dict[str, int]:
-    """Install the env's forward if it's missing or stale, and reload it if the
-    kernel lost it (a reboot whose libvirt hook didn't run); returns exe -> localhost
-    port ({} for a remote env). Interactive when it writes (sudo asks for your
-    password), so it runs before any progress output starts."""
     if not conf.envs[env_name].local:
         return {}
     grp = group(conf, env_name)
@@ -180,7 +163,7 @@ def reconcile(conf: Conf, env_name: str) -> dict[str, int]:
             )
         lo = BASE + grp * GROUP_SIZE
         print(f"  {ui.yellow('⚠')} forwarding {env_name} to localhost:{lo}–{lo + GROUP_SIZE - 1}")
-        from .hypervisor import hypervisor   # sudo -v up front
+        from .hypervisor import hypervisor
         hv = hypervisor(conf, env_name)
         for p in changed:
             text, mode = files[p]

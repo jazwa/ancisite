@@ -1,11 +1,8 @@
-# rendered by anci — do not edit
 # group @GROUP@
 # bridge @BRIDGE@
 table ip @TABLE@ {}
 delete table ip @TABLE@
 table ip @TABLE@ {
-    # connections this machine makes to 127.0.0.1:<port> go to the VM; nothing
-    # inbound is rewritten, so the ports aren't reachable from the network
     chain output {
         type nat hook output priority -100; policy accept;
 @RULES@
@@ -14,8 +11,6 @@ table ip @TABLE@ {
         type nat hook postrouting priority srcnat; policy accept;
         ip saddr 127.0.0.0/8 ip daddr @VM_IP@ oifname "@BRIDGE@" masquerade
     }
-    # route_localnet on the bridge would otherwise let a VM reach this
-    # machine's 127.0.0.1 services (cf. CVE-2020-8558)
     chain guard {
         type filter hook prerouting priority raw; policy accept;
         iifname "@BRIDGE@" ip daddr 127.0.0.0/8 drop

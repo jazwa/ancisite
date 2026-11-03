@@ -21,7 +21,6 @@ class TestRenderCaddyfile(unittest.TestCase):
     def test_sites_sorted_with_ports(self):
         out = render_caddyfile([("z.example.com", 8001), ("a.example.com", 8000)])
         lines = out.splitlines()
-        self.assertEqual(lines[0], "# rendered by anci — do not edit")
         self.assertLess(lines.index("a.example.com {"), lines.index("z.example.com {"))
         self.assertIn("reverse_proxy 127.0.0.1:8000", out)
         self.assertIn("reverse_proxy 127.0.0.1:8001", out)
@@ -44,9 +43,8 @@ class TestRenderCaddyfile(unittest.TestCase):
     def test_header_names_are_unique(self):
         self.assertEqual(len({name for name, _ in SECURITY_HEADERS}), len(SECURITY_HEADERS))
 
-    def test_empty_sites_is_comment_only(self):
-        out = render_caddyfile([])
-        self.assertEqual(out.splitlines(), ["# rendered by anci — do not edit"])
+    def test_empty_sites_is_empty(self):
+        self.assertEqual(render_caddyfile([]).strip(), "")
 
 
 class TestRenderCaddyUnit(unittest.TestCase):

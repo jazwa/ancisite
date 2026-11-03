@@ -17,14 +17,10 @@ from .conf import Conf
 SSH_PORT = 22
 
 
-
 @dataclass
 class Hypervisor:
-    """This dev machine (`login` None) or a remote host (`login` = "user@host")."""
 
     login: str | None = None
-    # this dev machine only: False runs commands as you, not through sudo — for
-    # reads a `libvirt` group member may make without a password
     sudo: bool = True
 
     @property
@@ -35,12 +31,10 @@ class Hypervisor:
         if self.login is None:
             return ["sudo", "-n", "bash", "-c", script] if self.sudo else ["bash", "-c", script]
         user, host = self.login.split("@", 1)
-        # one shared ssh connection for the many commands an `up` runs
         return ["ssh", *ssh._mux_opts(user, host, SSH_PORT), "-o", "BatchMode=yes",
                 self.login, f"sudo -n bash -c {shlex.quote(script)}"]
 
     def run(self, script: str, *, input: str | None = None) -> subprocess.CompletedProcess:
-        """Run `script` as root on the hypervisor; never raises on failure."""
         try:
             return subprocess.run(self._argv(script), input=input,
                                   capture_output=True, text=True)
@@ -51,14 +45,12 @@ class Hypervisor:
             ) from e
 
     def root(self, script: str, what: str, *, input: str | None = None) -> str:
-        """`run`, raising a taxonomy error on failure. Returns stdout."""
         p = self.run(script, input=input)
         if p.returncode != 0:
             raise self.failure(p, what)
         return p.stdout
 
     def failure(self, p: subprocess.CompletedProcess, what: str) -> errors.EnvError:
-        """The taxonomy error for a failed `run` (sudo password, ssh, or the command)."""
         err = ((p.stderr or "") + (p.stdout or "")).strip()[-2000:]
         if "password is required" in err or "a terminal is required" in err:
             if self.login is None:
@@ -92,17 +84,13 @@ class Hypervisor:
         return p
 
     def probe(self, probes: dict[str, str]) -> dict[str, list[str]]:
-        """`ssh.facts`, as root on the hypervisor."""
         return ssh.parse_facts(self.run(ssh.facts_script(probes)).stdout)
 
     def hint(self, cmd: str) -> str:
-        """How the user runs `cmd` as root on this hypervisor themselves."""
         return f"sudo {cmd}" if self.login is None else f"ssh {self.login} sudo {cmd}"
 
 
 def hypervisor(conf: Conf, env_name: str) -> Hypervisor:
-    """The hypervisor of a managed env. A remote host is reached as your conf
-    user; locally, sudo asks for your password once, up front."""
     env = conf.envs[env_name]
     if is_remote_host(env):
         return Hypervisor(f"{auth.authorize(conf, env_name)}@{env.ip}")
@@ -113,9 +101,6 @@ def hypervisor(conf: Conf, env_name: str) -> Hypervisor:
 
 
 def libvirt_hypervisor(conf: Conf, env_name: str) -> Hypervisor:
-    """`hypervisor`, for work that only calls virsh (reading or resizing a
-    running VM). On this dev machine a `libvirt` group member may do that as
-    themselves, so sudo is asked for only when libvirt refuses you."""
     if not is_remote_host(conf.envs[env_name]):
         mine = Hypervisor(sudo=False)
         if mine.virsh("uri", check=False).returncode == 0:

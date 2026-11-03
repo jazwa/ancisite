@@ -4,8 +4,9 @@ that need root or a real systemd are stubs that keep their state in files.
 
 The stubs model what the scripts rely on:
 - systemctl: `enable` makes the `*.wants` link the unit's `WantedBy=` names,
-  `disable` removes it, `start`/`restart`/`stop` track which units run, and
-  every call is logged (`calls()`);
+  `disable` removes it, `start`/`restart`/`stop` track which units run, a unit
+  listed in `crash()` never comes up (`show` reports it waiting to restart),
+  and every call is logged (`calls()`);
 - useradd/groupadd/usermod/gpasswd/getent/id: accounts and the `anci` group;
 - install/chown: owners are dropped (the tests don't run as root);
 - sshd: a valid config, password logins off.
@@ -24,6 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from anci import auth, boxlock, forward, ssh
+from anci.inspect import walk
 
 _PREFIXES = ("/etc/", "/var/", "/usr/local/", "/home/", "/tmp/.anci-")
 
@@ -36,10 +38,20 @@ args=()
 for a in "$@"; do case "$a" in --quiet) quiet=1;; --now) now=1;; *) args+=("$a");; esac; done
 cmd=${args[0]}; units=("${args[@]:1}")
 active="$FAKE/active"; touch "$active"
+crash="$FAKE/crash"; touch "$crash"
+if [ "$cmd" = show ]; then   # show <unit> -p <property> --value
+  u=${units[0]}; prop=${units[2]}
+  if grep -qxF "$u" "$crash"; then
+    case "$prop" in ActiveState) echo activating;; NRestarts) echo 1;; esac
+  else
+    case "$prop" in ActiveState) grep -qxF "$u" "$active" && echo active || echo inactive;; NRestarts) echo 0;; esac
+  fi
+  exit 0
+fi
 for u in "${units[@]}"; do
   case "$cmd" in
     is-active) grep -qxF "$u" "$active" || exit 3 ;;
-    start|restart) grep -qxF "$u" "$active" || echo "$u" >> "$active" ;;
+    start|restart) grep -qxF "$u" "$crash" || grep -qxF "$u" "$active" || echo "$u" >> "$active" ;;
     stop) grep -vxF "$u" "$active" > "$active.t"; mv "$active.t" "$active" ;;
     enable)
       f="$FAKE_ROOT/etc/systemd/system/$u"
@@ -61,7 +73,7 @@ name=${@: -1}; echo "$name" >> "$FAKE/passwd"
 for a in "$@"; do [ "$a" = --create-home ] && mkdir -p "$FAKE_ROOT/home/$name"; done; exit 0
 ''',
     "groupadd": '#!/bin/bash\necho "${@: -1}" >> "$FAKE/groups"\n',
-    "id": '#!/bin/bash\n[ "$1" = -u ] && grep -qxF "$2" "$FAKE/passwd" 2>/dev/null\n',
+    "id": '#!/bin/bash\n[ "$1" = -u ] && grep -qxF "$2" "$FAKE/passwd" 2>/dev/null && echo 1000\n',
     "usermod": '#!/bin/bash\n# usermod -aG <group> <user>\necho "$2 $3" >> "$FAKE/members"\n',
     "gpasswd": r'''#!/bin/bash
 # gpasswd -d <user> <group>
@@ -173,6 +185,10 @@ class FakeBox:
         f = self.state / "active"
         return set(f.read_text().split()) if f.exists() else set()
 
+    def crash(self, *units: str) -> None:
+        """These units fail at every start, from now on."""
+        (self.state / "crash").write_text("".join(f"{u}\n" for u in units))
+
     def members(self) -> set[str]:
         f = self.state / "members"
         return {l.split()[1] for l in f.read_text().splitlines()} if f.exists() else set()
@@ -185,6 +201,7 @@ class FakeBox:
              mock.patch.object(ssh, "put", side_effect=self.put), \
              mock.patch.object(ssh, "connect", return_value=ssh.Conn(ip="127.0.0.1")), \
              mock.patch.object(ssh, "wait_ready"), \
+             mock.patch.object(walk, "SETTLE_S", 0), \
              mock.patch.object(boxlock, "hold", lambda *a, **k: contextlib.nullcontext()), \
              mock.patch.object(auth, "authorize", return_value="jack"), \
              mock.patch.object(forward, "reconcile", return_value={}), \

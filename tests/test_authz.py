@@ -30,7 +30,7 @@ from .status_support import box_facts, observed
 
 CONF = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.dev]
 ip = '127.0.0.1'
@@ -102,9 +102,9 @@ class TestIdentifyUser(unittest.TestCase):
         # the CI/service-identity path: no agent, key at a nonstandard location
         with tempfile.TemporaryDirectory() as td:
             key = Path(td) / "ci.pub"
-            key.write_text("ssh-ed25519 AAAACI ci@runner")
+            key.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI040f3180240ae5aa323f1b40888c6ce9c965372500a ci@runner")
             conf = Conf(
-                users={"ci": User(name="ci", ssh_pub_keys=["ssh-ed25519 AAAACI ci@runner"])},
+                users={"ci": User(name="ci", ssh_pub_keys=["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI040f3180240ae5aa323f1b40888c6ce9c965372500a ci@runner"])},
                 envs={},
                 exes={},
             )
@@ -126,14 +126,14 @@ class TestIdentifyUser(unittest.TestCase):
 
     def test_key_comment_does_not_matter(self):
         # conf says `jack`, the agent says `jack@dev-machine`: same key
-        self.assertEqual(self._identify("ssh-ed25519 AAAAK jack",
-                                        "ssh-ed25519 AAAAK jack@dev-machine\n"), "jack")
-        self.assertEqual(self._identify("ssh-ed25519 AAAAK",
-                                        "ssh-ed25519 AAAAK jack@dev-machine\n"), "jack")
+        self.assertEqual(self._identify("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b jack",
+                                        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b jack@dev-machine\n"), "jack")
+        self.assertEqual(self._identify("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b",
+                                        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b jack@dev-machine\n"), "jack")
 
     def test_a_different_key_is_not_you(self):
-        self.assertEqual(self._identify("ssh-ed25519 AAAAK jack",
-                                        "ssh-ed25519 BBBBK jack\n"), "?")
+        self.assertEqual(self._identify("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b jack",
+                                        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI39e2721ac7f63c57c9bd3129918e20e053145ec85d9 jack\n"), "?")
 
 
 class TestPinning(unittest.TestCase):
@@ -148,7 +148,7 @@ class TestPinning(unittest.TestCase):
             conf = load_in(td)
             pin = ssh.pin_path(conf, "staging")
             pin.parent.mkdir(parents=True, exist_ok=True)
-            pin.write_text("198.51.100.10 ssh-ed25519 AAAA\n")
+            pin.write_text("198.51.100.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f4\n")
             conn = ssh.connect(conf, "staging", "jack")
         self.assertIn("StrictHostKeyChecking=yes", conn.opts)
         self.assertIn(f"UserKnownHostsFile={pin}", conn.opts)
@@ -200,14 +200,14 @@ class TestEnvTrust(unittest.TestCase):
         import contextlib
         import io
 
-        scanned = "198.51.100.10 ssh-ed25519 AAAA\n198.51.100.10 ssh-rsa BBBB\n"
+        scanned = "198.51.100.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f4\n198.51.100.10 ssh-rsa AAAAB3NzaC1yc2EA4a8d8134f29b0b7b60c126f5532bc9f5d9bb73037373cf6f\n"
         with tempfile.TemporaryDirectory() as td:
             conf = load_in(td)
             with self._scan(scanned), contextlib.redirect_stdout(io.StringIO()):
                 keys = ssh.env_trust(conf, "staging", stdin=io.StringIO("y\n"))
             # the caller pins them once the box is set up
             self.assertFalse(ssh.pin_path(conf, "staging").exists())
-        self.assertEqual(keys, ["198.51.100.10 ssh-ed25519 AAAA", "198.51.100.10 ssh-rsa BBBB"])
+        self.assertEqual(keys, ["198.51.100.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f4", "198.51.100.10 ssh-rsa AAAAB3NzaC1yc2EA4a8d8134f29b0b7b60c126f5532bc9f5d9bb73037373cf6f"])
 
     def test_trust_abort_writes_nothing(self):
         import contextlib
@@ -215,7 +215,7 @@ class TestEnvTrust(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             conf = load_in(td)
-            with self._scan("198.51.100.10 ssh-ed25519 AAAA\n"), contextlib.redirect_stdout(
+            with self._scan("198.51.100.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f4\n"), contextlib.redirect_stdout(
                 io.StringIO()
             ):
                 keys = ssh.env_trust(conf, "staging", stdin=io.StringIO("n\n"))

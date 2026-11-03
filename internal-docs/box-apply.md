@@ -65,6 +65,9 @@ secrets both restart `web`) produce the same id, and it runs once.
 | caddy or litestream binary | restart that service |
 
 Every run also checks that password logins are off, starts litestream if it's stopped, and cleans up unused files.
+A run that restarted services waits a few seconds once, then checks each one is running and that systemd hasn't
+restarted it on its own (`box/verify`, built from each step's `verify`); one that isn't fails the run with the end
+of its log.
 
 ## Order
 

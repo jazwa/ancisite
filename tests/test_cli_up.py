@@ -12,7 +12,7 @@ from anci.conf import load
 
 CONF = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.dev]
 ip = '127.0.0.1'

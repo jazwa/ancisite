@@ -28,7 +28,7 @@ LOCK = "/run/lock/anci.lock"
 WHO = "/run/lock/anci.who"
 WAIT_S = 600
 
-_held: dict[tuple[str, int], int] = {}   # (ip, port) -> nesting depth
+_held: dict[tuple[str, int], int] = {}
 
 
 def _script(who: str) -> str:
@@ -76,18 +76,15 @@ def _acquire(conn: ssh.Conn, user: str, what: str) -> subprocess.Popen:
 def _release(proc: subprocess.Popen) -> None:
     try:
         if proc.stdin is not None:
-            proc.stdin.close()      # `cat` sees EOF → the shell exits → flock released
+            proc.stdin.close()
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        proc.kill()                 # the session dying releases it too
+        proc.kill()
         proc.wait()
 
 
 @contextmanager
 def hold(conn: ssh.Conn, user: str, what: str, *, wait_ready: bool = False):
-    """Hold the box's lock for the `with` block (waiting up to WAIT_S for it).
-    `wait_ready`: if the box can't be reached or refuses the login and may still
-    be booting, wait for it (`ssh.wait_ready`) and try once more."""
     key = (conn.ip, conn.port)
     if key in _held:
         _held[key] += 1

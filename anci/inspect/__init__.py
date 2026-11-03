@@ -25,20 +25,16 @@ def _owner(change: Change) -> Resource | None:
 
 
 def worth_showing(changes: list[Change]) -> list[Change]:
-    """The changes to show someone: all but the removal of something anci
-    leaves on the box on purpose (a db taken out of anci.toml keeps its data)."""
     return [c for c in changes
             if not (c.action is Action.DELETE and (r := _owner(c)) and r.kept_when_removed)]
 
 
 def describe(change: Change) -> str:
-    """A change as one plain line, in its resource's own words."""
     r = _owner(change)
     return format_change(change, r.field_words if r else None)
 
 
 def target_state(conf: Conf, env_name: str) -> TargetState:
-    """The box as the conf wants it. No ssh."""
     state = TargetState()
     for r in RESOURCES:
         part = r.target(conf, env_name)
@@ -48,8 +44,6 @@ def target_state(conf: Conf, env_name: str) -> TargetState:
 
 
 def observed_state(conn: ssh.Conn, extra: dict[str, str] | None = None) -> ObservedState:
-    """The box as it is now. One ssh call, which also runs the `extra` probes
-    (key -> shell; their output lands in `state.extra`)."""
     probes = {r.name: r.probes() for r in RESOURCES}
     found = ssh.facts(conn, {**{f"{name}/{key}": cmd
                                 for name, p in probes.items() for key, cmd in p.items()},

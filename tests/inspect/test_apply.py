@@ -4,6 +4,7 @@ and after every run, inspecting the box again finds nothing left to change."""
 import contextlib
 import io
 import re
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -179,6 +180,33 @@ class TestStatic(ApplyTest):
         out = self.deploy_static(conf)
         self.assertIn("nothing new", out)
 
+    def served(self, rel: str) -> Path:
+        """Where `rel` resolves to through the served static link (raises when it doesn't)."""
+        target = self.box.path(layout.static_link("app")).resolve() / rel
+        return target.resolve(strict=True)
+
+    def test_a_deleted_version_is_rebuilt_by_the_next_deploy(self):
+        conf = self.conf(self.STATIC)
+        self.deploy_static(conf)
+        shutil.rmtree(self.box.path(layout.static_link("app")).resolve())
+        self.assertIn("exe.app", [c.identifier for c in self.remaining_with_static(conf)])
+        self.deploy_static(conf)
+        self.assertEqual(self.served("index.html").read_text(), "<h1>hi</h1>")
+
+    def test_a_lost_blob_is_shipped_again_and_relinked(self):
+        conf = self.conf(self.STATIC)
+        self.deploy_static(conf)
+        self.served("css/a.css").unlink()
+        self.deploy_static(conf)
+        self.assertEqual(self.served("css/a.css").read_text(), "h1{}")
+
+    def remaining_with_static(self, conf) -> list:
+        """What a deploy of the same static files still finds to change."""
+        from anci import staticfiles
+        target = target_state(conf, "dev")
+        target["exe.app"]["static"] = staticfiles.scan(self.dir / "public").id
+        return diff(observed_state(None), target)
+
     def test_static_dropped_from_the_conf_is_unlinked(self):
         self.deploy_static(self.conf(self.STATIC))
         conf = self.conf()
@@ -187,16 +215,48 @@ class TestStatic(ApplyTest):
         self.assertFalse(self.box.path(layout.static_link("app")).is_symlink())
 
 
+class TestStartup(ApplyTest):
+    def test_an_app_that_fails_to_start_fails_the_run_with_its_log(self):
+        conf = self.conf()
+        log = self.box.path(layout.log_path("app"))
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("listening on :8000\nbind: address already in use\n")
+        self.box.crash("app.service")
+        with self.assertRaises(errors.EnvError) as cm:
+            self.converge(conf, deploy=["app"])
+        self.assertIn("app failed to start", cm.exception.why)
+        self.assertIn("  bind: address already in use", cm.exception.why)
+        self.assertConverged(conf)   # everything else was applied
+
+    def test_it_is_checked_again_after_the_fix(self):
+        conf = self.conf()
+        self.box.crash("app.service")
+        with self.assertRaises(errors.EnvError):
+            self.converge(conf, deploy=["app"])
+        self.box.crash()
+        fixed = write_source(self.dir, "app", ELF + b" fixed")
+        with contextlib.redirect_stdout(io.StringIO()):
+            run_mod.converge(conf, "dev", inputs=deploy_inputs({"app": fixed}))
+        self.assertIn("app.service", self.box.active())
+
+    def test_a_run_that_restarts_nothing_checks_nothing(self):
+        conf = self.conf()
+        self.converge(conf, deploy=["app"])
+        self.box.clear_calls()
+        self.converge(conf)
+        self.assertFalse([c for c in self.box.calls() if c.startswith("show")])
+
+
 class TestUsers(ApplyTest):
     WITH_AMY = CONF.replace("access-users = ['jack']", "access-users = ['jack', 'amy']") + \
-        "\n[user.amy]\nssh-pub-keys = 'ssh-ed25519 BBBB amy'\n"
+        "\n[user.amy]\nssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI4ae0b15cd50d7abcd82c81c07b302cb852fb93487a1 amy'\n"
 
     def test_a_user_added_then_removed(self):
         conf = self.conf(self.WITH_AMY)
         self.converge(conf)
         self.assertConverged(conf)
         self.assertEqual(self.box.members(), {"jack", "amy"})
-        self.assertIn("BBBB", self.box.path("/home/amy/.ssh/authorized_keys").read_text())
+        self.assertIn("4ae0b15cd50d", self.box.path("/home/amy/.ssh/authorized_keys").read_text())
         conf = self.conf()
         self.converge(conf)
         self.assertConverged(conf)

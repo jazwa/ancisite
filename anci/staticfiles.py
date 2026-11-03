@@ -26,13 +26,12 @@ from .hashes import sha256_file
 
 @dataclass
 class Scanned:
-    id: str                 # 16 hex of the manifest hash (layout.is_static_id)
-    root: Path              # the local directory to ship
+    id: str
+    root: Path
     n_files: int
     n_bytes: int
-    entries: list[tuple[str, str]]   # (relative path, file sha256), sorted by path
+    entries: list[tuple[str, str]]
 def bad_name(rel: str) -> str | None:
-    """Why a relative path can't be shipped, or None if it can."""
     try:
         rel.encode("utf-8")
     except UnicodeEncodeError:
@@ -47,7 +46,6 @@ def bad_name(rel: str) -> str | None:
 
 
 def manifest_id(entries: list[tuple[str, str]]) -> str:
-    """The version id of (relative path, file sha256) pairs."""
     h = hashlib.sha256()
     for rel, sha in sorted(entries):
         h.update(f"{rel}\0{sha}\n".encode())
@@ -63,7 +61,6 @@ def _refuse(root: Path, rel: str, why: str) -> errors.AppError:
 
 
 def _walk(root: Path) -> list[str]:
-    """Every regular file under `root`, as sorted relative paths."""
     out: list[str] = []
 
     def visit(d: Path, prefix: str) -> None:
@@ -88,7 +85,6 @@ def _walk(root: Path) -> list[str]:
 
 
 def scan(root: Path) -> Scanned:
-    """Validate and hash the directory `root`, naming its version."""
     entries, n_bytes = [], 0
     for rel in _walk(root):
         p = root / rel

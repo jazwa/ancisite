@@ -13,30 +13,30 @@ each group. Each gives what was done, what happened, and what should happen.
 
 | Severity | # | Finding |
 |---|---|---|
-| Critical | S1 | A newline in env-vars or schedule adds lines to the unit file: the app ran as root |
-| Critical | S2 | The user name `anci` gives the apps' account passwordless sudo |
-| Critical | B1 | An exe named `ssh` takes over the box's ssh, and anci can't remove it |
+| Critical, fixed | S1 | A newline in env-vars or schedule adds lines to the unit file: the app ran as root |
+| Critical, fixed | S2 | The user name `anci` gives the apps' account passwordless sudo |
+| Critical, partly fixed | B1 | An exe named `ssh` takes over the box's ssh, and anci can't remove it |
 | Critical | B2 | A sudoers grant with the wrong mode locks anci out, with an unclear error |
-| High | S3 | Keys aren't validated: a newline in a key adds a line, with options, to authorized_keys |
+| High, fixed | S3 | Keys aren't validated: a newline in a key adds a line, with options, to authorized_keys |
 | High | S4 | The secrets file made world-readable or given another owner isn't noticed |
-| High | B3 | A long exe name passes the check, then leaves the box stuck |
-| High | W1 | Db names that differ in case or `-`/`_` share an env var: apps switched to an empty db |
-| High | W2 | A deleted static version or static blob is never noticed or repaired |
+| High, partly fixed | B3 | A long exe name passes the check, then leaves the box stuck |
+| High, fixed | W1 | Db names that differ in case or `-`/`_` share an env var: apps switched to an empty db |
+| High, fixed | W2 | A deleted static version or static blob is never noticed or repaired |
 | High | V1 | Plan reads only the running VM: a bad saved size stays hidden until the VM won't boot |
-| High | V2 | Memory can be lowered while the VM runs, with no lower limit: 256mb made the box unreachable |
+| High, partly fixed | V2 | Memory can be lowered while the VM runs, with no lower limit: 256mb made the box unreachable |
 | High | V3 | A renamed env finds no secrets, and nothing says so |
-| High | V4 | A disk smaller than the 3 GiB base image passes the check; `up --recreate` deletes the old VM, then fails |
-| High | V5 | Memory below what the box needs passes the check; a new VM never boots and `up` waits 7 minutes |
-| High | R1 | Deploy says "restarted" for a service that fails at once; status says "stopped" |
-| Medium | S5 | Two users can share a key, and the first one listed wins |
+| High, partly fixed | V4 | A disk smaller than the 3 GiB base image passes the check; `up --recreate` deletes the old VM, then fails |
+| High, fixed | V5 | Memory below what the box needs passes the check; a new VM never boots and `up` waits 7 minutes |
+| High, fixed | R1 | Deploy says "restarted" for a service that fails at once; status says "stopped" |
+| Medium, fixed | S5 | Two users can share a key, and the first one listed wins |
 | Medium | W3 | `$`, `\` and tabs in args and env-vars don't reach the app as written |
-| Medium | W4 | Setting `ANCI_PORT` in env-vars never settles |
+| Medium, fixed | W4 | Setting `ANCI_PORT` in env-vars never settles |
 | Medium | W5 | A changed extension doesn't restart the apps |
 | Medium | V6 | Raising vcpus or memory past the max, or lowering vcpus, waits for a VM restart; plan and reconcile repeat it |
 | Medium | V7 | A vcpu added while the VM runs stays offline in the guest; plan says no changes |
 | Medium | V8 | Renaming an env leaves the old VM running, and no anci command can reach it |
 | Medium | V9 | `up` on a VM that's shutting down treats it as running, then waits 7 minutes for a VM that's off |
-| Medium | V10 | VM sizes aren't sanity-checked: 999 vcpus and 64 GiB went into the saved config |
+| Medium, partly fixed | V10 | VM sizes aren't sanity-checked: 999 vcpus and 64 GiB went into the saved config |
 | Medium | V11 | Plan fails with an error on a disk shrink |
 | Medium | V12 | Memory above the host's passes the check when a VM is created |
 | Medium | V13 | A failed filesystem grow is silent |
@@ -68,7 +68,7 @@ each group. Each gives what was done, what happened, and what should happen.
 
 ## Security
 
-### S1. A newline in env-vars or schedule adds lines to the unit file: the app ran as root (Critical)
+### S1. A newline in env-vars or schedule adds lines to the unit file: the app ran as root (Critical, fixed)
 
 anci writes these values into systemd unit files without rejecting newlines.
 - `env-vars = { INJ = "x\nUser=root\nNoNewPrivileges=false\nProtectSystem=false" }` deployed cleanly, and
@@ -80,8 +80,9 @@ anci writes these values into systemd unit files without rejecting newlines.
 Whoever edits the conf already has sudo on the box, so this isn't a privilege gain for them. But a reviewer reading
 `env-vars` doesn't expect a change to the app's user or sandbox, and a pasted value with a newline breaks the app.
 **Should**: reject control characters (newline, tab, NUL) in every conf value that goes into a unit file.
+Fixed: No control characters are allowed in any conf key or value (`validate.check_text`).
 
-### S2. The user name `anci` gives the apps' account passwordless sudo (Critical)
+### S2. The user name `anci` gives the apps' account passwordless sudo (Critical, fixed)
 
 `[user.anci]` in `access-users` was applied: the box got `/etc/sudoers.d/anci-anci` with
 `anci ALL=(ALL) NOPASSWD:ALL`, and `sudo -u anci sudo -n id` printed `uid=0(root)`. `anci` is the account every
@@ -90,8 +91,9 @@ as `anci` gets root. Keys went to `/home/anci/.ssh` (its home is `/var/lib/anci`
 `[user.root]` passes the conf check too (not applied). Taking the user out again removed the grant cleanly.
 **Should**: reject `anci`, `root`, and the names of existing system accounts (`caddy`, `daemon`, `nobody`, …) in
 the conf check.
+Fixed: `root`, `anci`, `caddy` and anci's other names are reserved for every kind of name. On the box, the grant step refuses an existing account below uid 1000.
 
-### S3. Keys aren't validated: a newline in a key adds a line, with options, to authorized_keys (High)
+### S3. Keys aren't validated: a newline in a key adds a line, with options, to authorized_keys (High, fixed)
 
 `ssh-pub-keys = ['not a key']` is accepted and written as-is. A key string containing a newline,
 `"<amy key>\ncommand=\"echo injected\" <cy key>"`, became two lines in bo's `authorized_keys`, and
@@ -99,6 +101,7 @@ the conf check.
 mistakes and review: a reviewer sees one key, and the box gets another, with options.
 **Should**: accept only one well-formed public key per entry (type, base64, optional comment), with no options
 and no newlines.
+Fixed: Each entry must be one public key whose base64 decodes to a key of the type it names, so options and extra lines are refused.
 
 ### S4. The secrets file made world-readable or given another owner isn't noticed (High)
 
@@ -108,17 +111,18 @@ compared. The same holds for units: `chmod 666` on `web.service` went unnoticed,
 world-writable … Proceeding anyway". For sudoers grants, see B2.
 **Should**: compare the mode and owner of the files anci writes: at least secrets, sudoers grants, units.
 
-### S5. Two users can share a key, and the first one listed wins (Medium)
+### S5. Two users can share a key, and the first one listed wins (Medium, fixed)
 
 `[user.cy]` holding zhao's key is accepted. anci takes the first user in the file whose key matches yours
 (`auth.identify_user`). With `[user.cy]` above `[user.zhao]` and cy not in `access-users`, plan failed with
 "you (cy) don't have access to env 'dev'", although zhao has access. With cy in `access-users`, runs would log in
 and record releases as cy (inferred from the code, not checked).
 **Should**: reject a key held by two users.
+Fixed: A key held by two users is refused.
 
 ## Box left broken
 
-### B1. An exe named `ssh` takes over the box's ssh, and anci can't remove it (Critical)
+### B1. An exe named `ssh` takes over the box's ssh, and anci can't remove it (Critical, partly fixed)
 
 `[exe.ssh]` passes the conf check. Its link `/etc/systemd/system/ssh.service` replaces Debian's unit of the same
 name. Deploying it printed `✓ applying  … ssh restarted`. Starting it stopped `ssh.socket` (Debian marks the two
@@ -133,6 +137,9 @@ connection: removed the unit and exe dir, then re-enabled `ssh.socket`, which wa
 **Should**: reject exe names that match a unit already on the box (check `systemctl list-unit-files` before
 creating one), or put exes under a prefix (`anci-<exe>.service`). Stop and disable only units whose file is
 anci's own.
+Partly fixed: `ssh`, `sshd`, `networking` and `systemd-networkd` are reserved names: the units whose loss cuts the
+box off. Still open: an exe named like any other unit on the box replaces it, and removing the exe leaves that unit
+disabled (`disable` acts on units that aren't anci's). Recoverable by hand over ssh.
 
 ### B2. A sudoers grant with the wrong mode locks anci out, with an unclear error (Critical)
 
@@ -145,7 +152,7 @@ root password), so only `anci dev up --recreate` recovered it.
 from S4 would catch a wrong mode while sudo still works. A second way in for a VM anci runs (the guest agent)
 would allow repair.
 
-### B3. A long exe name passes the check, then leaves the box stuck (High)
+### B3. A long exe name passes the check, then leaves the box stuck (High, partly fixed)
 
 An exe with a 250-character name passes the conf check. Its unit name, `<name>.service`, is longer than the
 255-byte limit for a file name. `anci dev deploy <name>` failed halfway with `install: cannot stat
@@ -159,6 +166,7 @@ already ran is kept, the rest is picked up", isn't true here. Fixed by hand with
 also passes the check (not applied).
 **Should**: cap exe and db names in the conf check, so that every path built from them fits (e.g. 64
 characters). A step that fails on one resource shouldn't stop the restarts that other resources owe.
+Partly fixed: Names are capped at 32 characters. Still open: a failed step stops the restarts other resources owe.
 
 ### B4. A directory where a unit file should be stops every run (Low)
 
@@ -167,7 +175,7 @@ doesn't replace it. Only happens by hand.
 
 ## Apps silently get the wrong thing
 
-### W1. Db names that differ in case or `-`/`_` share an env var: apps switched to an empty db (High)
+### W1. Db names that differ in case or `-`/`_` share an env var: apps switched to an empty db (High, fixed)
 
 Exe names are checked for this ("names may not differ only in case or in '.', '_', '-'"); db names aren't.
 - Adding `[db.Main]` next to `[db.main]` changed every app's `ANCI_DB_MAIN_PATH` from `main` to `Main`.
@@ -178,14 +186,18 @@ Exe names are checked for this ("names may not differ only in case or in '.', '_
   that db.
 **Should**: apply the exe rule to db names, and build db env var names the way port names are built (anything
 not a letter or digit becomes `_`).
+Fixed: One name rule for every kind: lowercase letters, digits and `-`, so no two db names share an env var.
 
-### W2. A deleted static version or static blob is never noticed or repaired (High)
+### W2. A deleted static version or static blob is never noticed or repaired (High, fixed)
 
 After `rm -rf` of the static version web serves: plan said `✓ no changes`, and deploy did nothing. After
 deleting every blob, the build and vendored binaries were restored, but every static file stayed a broken link.
 A redeploy can't fix either, because the static id hasn't changed. Only changing a static file does.
 **Should**: check that the served static version exists and that its links resolve (the build blob is checked
 this way, with `readlink -e`).
+Fixed: a static version counts only when its dir exists and every link in it resolves; otherwise the exe's
+`static` reads `broken`, plan shows it (with the local build), and the next deploy rebuilds it and ships the
+missing blobs.
 
 ### W3. `$`, `\` and tabs in args and env-vars don't reach the app as written (Medium)
 
@@ -198,11 +210,12 @@ Checked in `/proc/<pid>/cmdline` and `environ`:
 - `100%`, `%h`, quotes, `it's`, unicode and empty values all came through correctly.
 **Should**: escape `$` as `$$` and `\` as `\\` in args, and quote env values that contain any whitespace.
 
-### W4. Setting `ANCI_PORT` in env-vars never settles (Medium)
+### W4. Setting `ANCI_PORT` in env-vars never settles (Medium, fixed)
 
 `env-vars = { ANCI_PORT = '9999' }`: the user's value wins, so the app listens on 9999. After the deploy, plan
 still shows `~ exe.web  port: 9999 → 8000`, every run restarts web, and status shows `starting` with no URL.
 **Should**: reject env-vars named `ANCI_*`, or at least `ANCI_PORT`.
+Fixed: env-vars named `ANCI_*` are refused.
 
 ### W5. A changed extension doesn't restart the apps (Medium)
 
@@ -240,12 +253,13 @@ The same with memory: after `mem = '64gb'` and back to `2gb`, the saved maximum 
 a maximum.
 **Should**: read the saved config too (`dumpxml --inactive`), compare both with the conf, and set both.
 
-### V2. Memory can be lowered while the VM runs, with no lower limit: 256mb made the box unreachable (High)
+### V2. Memory can be lowered while the VM runs, with no lower limit: 256mb made the box unreachable (High, partly fixed)
 
 `mem = '256mb'` (the box uses about 300 MiB): `reconcile` shrank the balloon, ssh to the box timed out, and the
 run's converge failed with "can't reach your box". The balloon stuck at about 310 MiB. Raising memory with
 `virsh setmem 1G` brought it back; nothing was killed. `mem = '1mb'` passes the conf check too (not run).
 **Should**: a minimum (e.g. 512 MiB), and refuse a live decrease below what the guest is using.
+Partly fixed: the conf check refuses memory below 512 MiB. Still open: a live decrease below what the guest uses.
 
 ### V3. A renamed env finds no secrets, and nothing says so (High)
 
@@ -256,7 +270,7 @@ has no `EnvironmentFile`, and web runs without `FOO`. Secrets are found by env n
 **Should**: when an env has no secrets but there's a secrets file for an env the conf no longer has, say so in
 plan and `up`.
 
-### V4. A disk smaller than the 3 GiB base image passes the check; `up --recreate` deletes the old VM, then fails (High)
+### V4. A disk smaller than the 3 GiB base image passes the check; `up --recreate` deletes the old VM, then fails (High, partly fixed)
 
 `disk = '2gb'`, then `anci dev up --recreate`, confirmed with `y`. anci destroyed and undefined the VM and deleted
 its disk, then failed: "creating the box's disk failed on your dev machine — try: re-run with --debug". The base
@@ -271,8 +285,9 @@ fails with "can't shrink", after the VM is created.
 header, or the versions map can carry it). In `--recreate`, check everything that can be checked before deleting
 the old VM. If creating the disk fails, remove the half-made file. Show the `qemu-img` error, not only "re-run
 with --debug".
+Partly fixed: The conf check refuses a disk below 4 GiB. Still open: `--recreate` deletes before every check has run, a half-made disk is left, and the `qemu-img` error is hidden.
 
-### V5. Memory below what the box needs passes the check; a new VM never boots and `up` waits 7 minutes (High)
+### V5. Memory below what the box needs passes the check; a new VM never boots and `up` waits 7 minutes (High, fixed)
 
 From the code; not run. The conf check has no minimum, and `up` passes `mem` straight to
 `virt-install --memory <MiB>`. A VM created with too little memory can't boot, or fails during its first boot,
@@ -280,6 +295,7 @@ and `up` waits the full 420s for ssh before "your box isn't answering after 420s
 is already deleted by then (as in V4). For scale: the box used about 300 MiB idle, and 256mb on a running VM made
 it unreachable (V2).
 **Should**: a minimum (around 512 MiB) in the conf check, checked before `--recreate` deletes anything.
+Fixed: The conf check refuses memory below 512 MiB, before `--recreate` deletes anything.
 
 ### V6. Raising vcpus or memory past the max, or lowering vcpus, waits for a VM restart; plan and reconcile repeat it (Medium)
 
@@ -326,12 +342,13 @@ it, resized the saved config, and then the guest finished shutting down. The wai
 **Should**: in the wait, stop as soon as the VM isn't running, and say so. In `up`, wait for a VM that's shutting
 down to finish, then start it.
 
-### V10. VM sizes aren't sanity-checked: 999 vcpus and 64 GiB went into the saved config (Medium)
+### V10. VM sizes aren't sanity-checked: 999 vcpus and 64 GiB went into the saved config (Medium, partly fixed)
 
 `vcpus = 999` and `mem = '64gb'` (on an 8-core, 15 GB host) both pass the conf check and were saved by
 `reconcile`. See V1 for the result.
 **Should**: a warning above the host's cores or memory, and a hard limit at what libvirt can start (255
 vcpus without extra setup).
+Partly fixed: The conf check refuses more than 255 vcpus. Still open: a warning above the host's cores or memory.
 
 ### V11. Plan fails with an error on a disk shrink (Medium)
 
@@ -371,7 +388,7 @@ the disk to 24gb — the box's disk is already 24 GiB". The display rounds down.
 
 ## Reporting and detection
 
-### R1. Deploy says "restarted" for a service that fails at once; status says "stopped" (High)
+### R1. Deploy says "restarted" for a service that fails at once; status says "stopped" (High, fixed)
 
 - A port already taken: deploy said `✓ applying  web restarted`, while web's log said
   `bind: … Address in use`. systemd kept retrying (`Restart=on-failure`), and web came up once the port was
@@ -380,6 +397,9 @@ the disk to 24gb — the box's disk is already 24 GiB". The display rounds down.
 - In both cases `status` says `stopped`, which reads as deliberate.
 **Should**: after a restart, wait a moment and check the unit is active; report "web failed to start: <last log
 lines>". Status should say "failing" (or "restarting") for a unit that keeps restarting.
+Fixed: a run that restarted services waits 3s once, then fails if one isn't active or systemd restarted it on
+its own (`NRestarts`, zeroed by `reset-failed` before each restart), with the end of its log. Status says
+"failing · restarted N×" or "failed". A service that fails after 3s is only caught by status.
 
 ### R2. Plan misses a stopped service and a plain file in an ext dir (Medium)
 

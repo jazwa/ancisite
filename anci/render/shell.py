@@ -22,22 +22,20 @@ ANCI_ACCOUNT_CMDS = (
 
 
 def sudoers_line(name: str) -> str:
-    """A user's sudoers grant (`/etc/sudoers.d/anci-<name>`)."""
     return f"{name} ALL=(ALL) NOPASSWD:ALL\n"
 
 
 def authorized_keys(keys: list[str]) -> str:
-    """A user's `authorized_keys`: one key per line."""
     return "".join(f"{k}\n" for k in keys)
 
 
 def grant_script(name: str, keys: list[str]) -> str:
-    """Root shell giving `name` access: the account (created if missing), the
-    `anci` group, passwordless sudo, and exactly `keys`."""
     n = _sh(name)
     home = f"/home/{n}"
     return "\n".join([
-        f"id -u {n} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash {n}",
+        f"if id -u {n} >/dev/null 2>&1; then [ \"$(id -u {n})\" -ge 1000 ] || "
+        f"{{ echo {_sh(f'{name} is a system account on the box: give the user another name')} >&2; exit 1; }}",
+        f"else useradd --create-home --shell /bin/bash {n}; fi",
         f"usermod -aG {ANCI_GROUP} {n}",
         f"printf '%s' {_sh(sudoers_line(name))} > /etc/sudoers.d/anci-{n}",
         f"chmod 440 /etc/sudoers.d/anci-{n}",
@@ -49,8 +47,6 @@ def grant_script(name: str, keys: list[str]) -> str:
 
 
 def revoke_script(name: str) -> str:
-    """Root shell taking `name`'s access away: group, sudo grant and keys. The
-    account stays (its files may matter); with no keys it can't log in."""
     n = _sh(name)
     return "\n".join([
         f"gpasswd -d {n} {ANCI_GROUP} >/dev/null 2>&1 || true",
@@ -59,16 +55,8 @@ def revoke_script(name: str) -> str:
 
 
 def render_accounts_script(users: dict[str, list[str]]) -> str:
-    """Shell script that reconciles guest accounts + `authorized_keys` to `users`.
-
-    Ensures the shared `anci` group + service user (every app runs as them),
-    grants each listed user access, and revokes anyone left in the group who
-    isn't listed. An adopted box's bootstrap runs it; converge does the same
-    per user (see anci/inspect/user.py).
-    """
     lines = ["set -e", *ANCI_ACCOUNT_CMDS]
     lines += [grant_script(name, keys) for name, keys in users.items()]
-    # revoke stale group members
     lines.append("for u in $(getent group %s | cut -d: -f4 | tr ',' ' '); do" % ANCI_GROUP)
     lines.append("  case \" $u \" in")
     for name in users:
@@ -81,11 +69,6 @@ def render_accounts_script(users: dict[str, list[str]]) -> str:
 
 
 def render_bootstrap_script() -> str:
-    """Shell script laying out the anci-owned dirs.
-
-    No packages are installed: sqlite3/litestream/caddy ship vendored on the
-    box's first converge (see `anci/converge/vendored.py`), and static files go
-    through the blob store over plain ssh, so the box needs no package manager."""
     return (
         "set -e\n"
         + "\n".join(layout_commands())
@@ -94,7 +77,6 @@ def render_bootstrap_script() -> str:
 
 
 def layout_commands() -> tuple[str, ...]:
-    """Idempotent `install -d` commands that set each dir's owner + mode."""
     return (
         f"install -d -o root -g {ANCI_GROUP} -m {layout.SHARED_MODE} {' '.join(layout.SHARED_DIRS)}",
         f"install -d -o root -g root -m {layout.CONFIG_MODE} {' '.join(layout.CONFIG_DIRS)}",
@@ -103,5 +85,4 @@ def layout_commands() -> tuple[str, ...]:
 
 
 def render_layout_script() -> str:
-    """Shell that ensures the base layout (safe to run repeatedly)."""
     return "set -e\n" + "\n".join(layout_commands()) + "\n"

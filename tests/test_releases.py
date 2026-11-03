@@ -7,7 +7,7 @@ from anci.conf import Conf, User
 
 def make_conf():
     return Conf(
-        users={"jack": User(name="jack", ssh_pub_keys=["ssh-ed25519 AAAA jack"])},
+        users={"jack": User(name="jack", ssh_pub_keys=["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack"])},
         envs={}, exes={},
     )
 
@@ -42,7 +42,7 @@ class TestIdentifyUser(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as td:
                     ssh_dir = Path(td) / ".ssh"
                     ssh_dir.mkdir()
-                    (ssh_dir / "id_ed25519.pub").write_text("ssh-ed25519 AAAA jack")
+                    (ssh_dir / "id_ed25519.pub").write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack")
                     fake_home.return_value = Path(td)
                     self.assertEqual(auth.identify_user(make_conf()), "jack")
 

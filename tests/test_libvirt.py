@@ -75,7 +75,7 @@ class FakeHypervisor(lvm.Hypervisor):
 
 CONF = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.dev]
 ip = '{ip}'
@@ -311,7 +311,7 @@ class TestEnvUp(unittest.TestCase):
         conf = _conf("10.0.0.5")
         pin = lvm.pin_path(conf, "dev")
         pin.parent.mkdir(parents=True)
-        pin.write_text("192.168.122.9 ssh-ed25519 OLD\n")
+        pin.write_text("192.168.122.9 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI099d90cbee62f89e6478e153eb3240efcbe4ac2231b\n")
         _, _, text = self._up(FakeHypervisor("jack@10.0.0.5", states=["running"]),
                               conf, recreate=True, force=True)
         self.assertFalse(pin.exists())

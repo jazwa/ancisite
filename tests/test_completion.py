@@ -14,7 +14,7 @@ from anci import cli
 
 CONF = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.dev]
 ip = '127.0.0.1'
@@ -87,8 +87,8 @@ class TestScript(unittest.TestCase):
 class TestReservedEnvNames(unittest.TestCase):
     def test_every_top_level_command_is_reserved(self):
         # an env named like one would be unreachable: `anci <word>` runs the command
-        from anci.conf import RESERVED_ENV_NAMES
-        self.assertLessEqual(set(cli.root.commands), RESERVED_ENV_NAMES)
+        from anci.validate import RESERVED_NAMES
+        self.assertLessEqual(set(cli.root.commands), RESERVED_NAMES)
 
 
 if __name__ == "__main__":

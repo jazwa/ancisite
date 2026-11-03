@@ -22,6 +22,8 @@ Status shows what's running in the env.
 |---|---|
 | serving | running and answering on its port |
 | starting | running, not answering yet |
+| failing | it crashed, and systemd restarts it again shortly (with how many times it has) |
+| failed | it kept crashing, and systemd stopped restarting it |
 | stopped | deployed, but not running |
 | scheduled · next … | a job that hasn't run yet, and when it next runs |
 | running · next … | a job running now |

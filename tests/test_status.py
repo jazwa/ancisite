@@ -34,7 +34,7 @@ from .status_support import box_facts, observed
 
 CONF = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.dev]
 ip = '127.0.0.1'
@@ -441,6 +441,15 @@ class TestResourceStats(unittest.TestCase):
         # no cpu/mem for a service that isn't running
         self.assertNotIn("%", row)
         self.assertNotIn("MB", row)
+        self.assertIn("stopped", row)
+
+    def test_a_crash_looping_service_is_failing_not_stopped(self):
+        current = [f"{layout.BLOB_DIR}/aaaa"]
+        row = self._row({"app current": current, "app active": ["activating"], "app restarts": ["3"]})
+        self.assertIn("failing · restarted 3×", row)
+        row = self._row({"app current": current, "app active": ["failed"], "app restarts": ["5"]})
+        self.assertIn("failed", row)
+        self.assertNotIn("stopped", row)
 
 
 class TestBoxStats(unittest.TestCase):

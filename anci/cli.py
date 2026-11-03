@@ -23,7 +23,6 @@ from .conf import Conf, find_conf, load
 
 
 def _from_ssh(e) -> errors.Error:
-    """An ssh transport failure, in the taxonomy's words."""
     stderr = e.stderr or ""
     if e.host_key:
         return errors.AuthError(
@@ -65,7 +64,6 @@ def _from_ssh(e) -> errors.Error:
 
 
 def _render_failure(e: BaseException, debug: bool) -> int:
-    """Render any exception through the error taxonomy."""
     from . import ssh
 
     if isinstance(e, ssh.SSHError):
@@ -77,7 +75,6 @@ def _render_failure(e: BaseException, debug: bool) -> int:
         if debug and e.kind == "internal":
             traceback.print_exc()
         return 1
-    # unexpected: report, don't explain
     ui.error(
         errors.InternalError(
             "something inside anci broke — please report this",
@@ -90,27 +87,17 @@ def _render_failure(e: BaseException, debug: bool) -> int:
     return 1
 
 
-# ---------------------------------------------------------------------------
-# global-option peeling (`--debug` works anywhere on the line)
-
-
 def _take_flag(argv: list[str], name: str) -> tuple[bool, list[str]]:
-    """Pull a bare flag out of argv; return (present, rest)."""
     return name in argv, [a for a in argv if a != name]
-
-
-# ---------------------------------------------------------------------------
-# completion: values come from the conf, read fresh on every TAB
 
 
 SHELLS = ["bash", "zsh", "fish"]
 
 
 def _quiet_conf() -> Conf | None:
-    """The conf for completion — never an error (no conf = nothing to offer)."""
     try:
         return load(find_conf())
-    except Exception:  # noqa: BLE001 — completion must not fail
+    except Exception:
         return None
 
 
@@ -129,10 +116,6 @@ def _info_names(ctx, param, incomplete):
     return [n for n in names if n.startswith(incomplete)]
 
 
-# ---------------------------------------------------------------------------
-# env-scoped verbs (`ctx.obj` carries the conf, the env and --debug)
-
-
 @click.command(help="Provision or boot this env's box (idempotent).")
 @click.option("--recreate", is_flag=True, help="Destroy the box and rebuild it from scratch.")
 @click.option("--force", is_flag=True, help="Skip the confirmation prompt.")
@@ -145,7 +128,7 @@ def up(obj, recreate, force, user):
 
     conf, env_name = obj["conf"], obj["env"]
     env = conf.envs[env_name]
-    pipe = ui.Pipeline()   # one report: the box, then the converge
+    pipe = ui.Pipeline()
     if env.adopted:
         if recreate:
             raise errors.ConfError(
@@ -162,8 +145,8 @@ def up(obj, recreate, force, user):
                 why=f"anci provisions {env_name}'s VM and creates your account on it",
             )
         if env_up(conf, env_name, recreate=recreate, force=force, pipe=pipe) is None:
-            return  # --recreate aborted: nothing touched, nothing to converge
-    converge(conf, env_name, grow_disk=True, pipe=pipe)   # infra only: no new app bytes
+            return
+    converge(conf, env_name, grow_disk=True, pipe=pipe)
     pipe.done()
 
 
@@ -199,9 +182,9 @@ def reconcile(obj):
     from .secrets import sync_recipients
 
     conf, env_name = obj["conf"], obj["env"]
-    vm_reconcile(conf, env_name)   # refuse a stopped box fast; resize a managed VM to the conf
-    sync_recipients(conf, env_name)  # the committed secrets file follows the conf's keys
-    converge(conf, env_name, grow_disk=True)   # no binaries: deployed exes keep their version
+    vm_reconcile(conf, env_name)
+    sync_recipients(conf, env_name)
+    converge(conf, env_name, grow_disk=True)
 
 
 @click.command(help="Where this env's files live on the box. Shows each file's size.")
@@ -243,7 +226,7 @@ def migrate(obj, db, baseline):
     from .commands.dbs import migrate as run
     from .providers.libvirt import require_running
 
-    require_running(obj["conf"], obj["env"])   # fail fast on a stopped box; never resizes it
+    require_running(obj["conf"], obj["env"])
     run(obj["conf"], db, obj["env"], baseline=baseline)
 
 
@@ -280,8 +263,6 @@ ENV_VERBS = [up, down, status, plan, reconcile, info, deploy, logs, migrate, reg
 
 
 def _check_env(conf: Conf, env_name: str, verb: str | None) -> None:
-    """Cross-references against the local project (offline) — fail before the
-    verb touches the guest. `secrets` is exempt: it is the remedy."""
     if verb in (None, "secrets"):
         return
     validate.validate_env(conf, env_name)
@@ -296,8 +277,6 @@ def _check_env(conf: Conf, env_name: str, verb: str | None) -> None:
 
 
 def _verb_rows(ctx: click.Context) -> list[tuple[str, str]]:
-    """(`deploy [EXE]`, summary) for every env verb, in definition order — what
-    help lists, with each verb's arguments shown."""
     rows = []
     for verb in ENV_VERBS:
         pieces = [p for p in verb.collect_usage_pieces(click.Context(verb, parent=ctx))
@@ -307,7 +286,6 @@ def _verb_rows(ctx: click.Context) -> list[tuple[str, str]]:
 
 
 class _Ordered(click.Group):
-    """An env's verbs: listed in definition order, each with its arguments."""
 
     def list_commands(self, ctx):
         return list(self.commands)
@@ -327,10 +305,6 @@ def _env_group(env_name: str) -> click.Group:
                     help=f"Commands for env '{env_name}'.")
 
 
-# ---------------------------------------------------------------------------
-# top level: init, completion, and one group per env
-
-
 @click.command(help="Generate a first anci.toml here.")
 def init():
     from .commands.init import init as run
@@ -345,7 +319,6 @@ def completion(shell):
 
 
 class _Root(click.Group):
-    """`init`, `completion`, and every env in anci.toml as its own group."""
 
     def format_usage(self, ctx, formatter):
         formatter.write_usage("anci", "[OPTIONS] ENV VERB [ARGS]...")
@@ -371,7 +344,7 @@ class _Root(click.Group):
         cmd = super().get_command(ctx, name)
         if cmd is not None:
             return cmd
-        if ctx.resilient_parsing:   # completing: an unknown word offers nothing
+        if ctx.resilient_parsing:
             conf = _quiet_conf()
             return _env_group(name) if conf and name in conf.envs else None
         conf = load(find_conf())
@@ -392,7 +365,7 @@ class _Root(click.Group):
 @click.option("--debug", is_flag=True, help="Show raw commands and output; status adds a drift report.")
 @click.version_option(__version__, "--version", prog_name="anci", message="%(prog)s %(version)s")
 def root(debug):
-    pass   # --debug is peeled off before parsing (see main), so it works anywhere
+    pass
 
 
 root.add_command(init)
@@ -400,14 +373,11 @@ root.add_command(completion)
 
 
 def _usage_error(e: click.UsageError) -> errors.ConfError:
-    """A command-line mistake, in the taxonomy's words."""
     path = e.ctx.command_path if e.ctx else "anci"
     return errors.ConfError(e.format_message(), try_=f"{path} --help")
 
 
 def _run(cmd: click.Command, argv: list[str], obj: dict, prog: str) -> int:
-    """Run a Click command without its own exit/error handling: errors come back
-    as exceptions, for the taxonomy to render."""
     try:
         rv = cmd.main(args=argv, prog_name=prog, standalone_mode=False, obj=obj)
     except click.UsageError as e:
@@ -420,7 +390,6 @@ def _run(cmd: click.Command, argv: list[str], obj: dict, prog: str) -> int:
 
 
 def _run_env(conf: Conf, env_name: str, argv: list[str], debug: bool) -> int:
-    """One env's verbs, with the conf already loaded."""
     return _run(_env_group(env_name), argv, {"conf": conf, "env": env_name, "debug": debug},
                 f"anci {env_name}")
 
@@ -435,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\ninterrupted")
         return 130
-    except Exception as e:  # noqa: BLE001 — the taxonomy boundary
+    except Exception as e:
         return _render_failure(e, debug)
 
 

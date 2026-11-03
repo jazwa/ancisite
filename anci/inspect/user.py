@@ -8,7 +8,7 @@ from ..render.shell import authorized_keys, grant_script, revoke_script, sudoers
 from .core import Resource, Step, pairs, sha
 
 _SUDOERS = "/etc/sudoers.d"
-_HOME = "/home"   # where the accounts script puts each user's home
+_HOME = "/home"
 
 
 class User(Resource):
@@ -32,8 +32,6 @@ class User(Resource):
             "group": group,
             "sudoers": f'cd {_SUDOERS} && for f in anci-*; do [ -f "$f" ] && '
                        f'echo "${{f#anci-}} $(sha256sum "$f" | cut -c1-64)"; done',
-            # every name anci may have given access: group members, plus sudoers
-            # grants (revoking removes the membership but has kept the grant)
             "keys": f'for u in $({{ {group}; {grants}; }} | sort -u); do k="{_HOME}/$u/.ssh/authorized_keys"; '
                     f'[ -f "$k" ] && echo "$u $(sha256sum "$k" | cut -c1-64)"; done',
         }

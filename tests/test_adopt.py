@@ -23,7 +23,7 @@ from anci.box import is_remote
 
 REMOTE_CONF = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.prod]
 ip = '203.0.113.10'
@@ -34,7 +34,7 @@ vm = { anci-version = '0.0.1' }
 
 DEPLOY_CONF = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.dev]
 ip = '127.0.0.1'
@@ -47,7 +47,7 @@ source = './server'
 [exe.app.env.dev]
 """
 
-KEY = "203.0.113.10 ssh-ed25519 AAAA"
+KEY = "203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f4"
 
 # a valid app "binary" for deploy tests: a minimal x86_64 ELF header (the deploy
 # arch guard refuses scripts, and b"hello" is neither an ELF nor a script)
@@ -62,7 +62,7 @@ def load_conf(directory: str, text: str) -> Conf:
 
 def make_conf(*envs: Env) -> Conf:
     return Conf(
-        users={"jack": User(name="jack", ssh_pub_keys=["ssh-ed25519 AAAA jack"])},
+        users={"jack": User(name="jack", ssh_pub_keys=["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack"])},
         envs={e.name: e for e in envs},
         exes={},
     )
@@ -85,8 +85,8 @@ class TestRenderAccountsScript(unittest.TestCase):
     def test_renders_group_accounts_keys_and_sudo(self):
         script = render_accounts_script(
             {
-                "jack": ["ssh-ed25519 AAAA a"],
-                "alice": ["ssh-ed25519 AAAA b", "ssh-ed25519 AAAA c"],
+                "jack": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI5064a8d508da9f415ed7476ad71d5b7a03a1605098c a"],
+                "alice": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe4a3381881dbfac98b3d0f3d53f63f005d0bf3268cb b", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI41985beffbeaf4229dd70403c10b376c558534e0bad c"],
             }
         )
         self.assertIn("groupadd anci", script)
@@ -94,8 +94,8 @@ class TestRenderAccountsScript(unittest.TestCase):
         self.assertIn("useradd --create-home --shell /bin/bash jack", script)
         self.assertIn("useradd --create-home --shell /bin/bash alice", script)
         self.assertIn("jack ALL=(ALL) NOPASSWD:ALL", script)
-        self.assertIn("ssh-ed25519 AAAA a", script)
-        self.assertIn("ssh-ed25519 AAAA c", script)
+        self.assertIn("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI5064a8d508da9f415ed7476ad71d5b7a03a1605098c a", script)
+        self.assertIn("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI41985beffbeaf4229dd70403c10b376c558534e0bad c", script)
         self.assertIn("gpasswd -d", script)  # stale-member revocation
 
     def test_writes_exactly_the_conf_keys(self):
@@ -136,7 +136,7 @@ class TestEnsureAnciAccount(unittest.TestCase):
 
 class TestVerifyChecks(unittest.TestCase):
     def test_checks_accounts_and_layout(self):
-        checks = verify_checks({"jack": ["ssh-ed25519 AAAA a"]})
+        checks = verify_checks({"jack": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI5064a8d508da9f415ed7476ad71d5b7a03a1605098c a"]})
         for key in ("group anci", "account anci", "account jack", "member jack",
                     "keys jack", "dir /var/lib/anci/store/blobs",
                     "dir /etc/anci/units"):
@@ -210,7 +210,7 @@ class TestUpAdoptGuards(unittest.TestCase):
             conf = load_conf(td, REMOTE_CONF)
             pin = ssh.pin_path(conf, "prod")
             pin.parent.mkdir(parents=True)
-            pin.write_text("203.0.113.10 ssh-ed25519 AAAA\n")
+            pin.write_text("203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f4\n")
             with mock.patch.object(ssh, "env_trust") as trust, \
                  mock.patch.object(ssh, "script") as script, \
                  mock.patch.object(ssh, "sudo") as sudo_mock, \

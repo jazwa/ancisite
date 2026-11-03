@@ -18,21 +18,11 @@ from .conf import Conf
 
 
 def resolve_secrets(conf: Conf, env_name: str) -> tuple[str | None, str]:
-    """The plaintext secrets content for an env, from either tier.
-
-    Tier 1 (recommended): committed sops-encrypted `envs/<env>/secrets.env`,
-    decrypted with your ssh key via `sops -d`.
-    Tier 2 (fallback): plaintext `.anci/secrets.<env>.env` — you keep it,
-    anci ships it.
-
-    Returns (content | None, where-it-came-from). None = no secrets for this
-    env (the unit renders without an EnvironmentFile).
-    """
     encrypted = paths.secrets_encrypted(conf, env_name)
     plaintext = paths.secrets_plaintext(conf, env_name)
 
     if encrypted.is_file():
-        sops = sops_binary(conf, env_name)  # vendored on first use — never a manual install
+        sops = sops_binary(conf, env_name)
         p = subprocess.run(
             [str(sops), "-d", str(encrypted)], capture_output=True, text=True, timeout=60
         )
@@ -53,21 +43,13 @@ def resolve_secrets(conf: Conf, env_name: str) -> tuple[str | None, str]:
 
 
 def has_secrets(conf: Conf, env_name: str) -> bool:
-    """Whether `resolve_secrets` finds a file for the env — without decrypting it."""
     return (paths.secrets_encrypted(conf, env_name).is_file()
             or paths.secrets_plaintext(conf, env_name).is_file())
 
 
 def sops_binary(conf, env_name: str) -> Path:
-    """The vendored sops binary — fetched hash-pinned on first use.
-
-    sops stays on the dev machine: decryption is client-side, in memory; the guest
-    never needs it. The version map carries the sha256 pin; the binary belongs
-    to the env's pinned anci-version.
-    """
     entry = versions_mod.get(versions_mod.load(), conf.envs[env_name].anci_version)
     plat = bin_mod.local_platform()
-    # versioned, per-platform cache name: a pin bump must not keep serving the old binary
     name = f"sops-{entry.sops}-{plat}"
     cached = paths.bin_cache_dir() / name
     if cached.is_file():
@@ -86,22 +68,15 @@ def sops_binary(conf, env_name: str) -> Path:
     return vendored
 
 
-# ---------------------------------------------------------------------------
-# who can read the encrypted file
-
-
 _SOPS_RECIPIENT_RE = re.compile(r"^sops_age__list_\d+__map_recipient=(.+)$", re.M)
 
 
 def _key_id(key: str) -> tuple[str, str] | None:
-    """(type, base64) of an ssh public key line; the trailing comment is only a label."""
     parts = key.split()
     return (parts[0], parts[1]) if len(parts) >= 2 else None
 
 
 def conf_recipients(conf: Conf, env_name: str) -> list[str]:
-    """The ssh keys that should be able to read this env's secrets: every key of
-    every user with access to it (sorted, validated as sops-supported)."""
     recipients = sorted(
         {k for name in conf.envs[env_name].access_users
          for k in conf.users[name].ssh_pub_keys}
@@ -117,11 +92,6 @@ def conf_recipients(conf: Conf, env_name: str) -> list[str]:
 
 
 def recipient_changes(sops_file_text: str, wanted: list[str]) -> tuple[list[str], list[str]]:
-    """(keys to add, keys to remove) to make an encrypted dotenv's recipients equal `wanted`.
-
-    Reads the recipients sops stored in the file's own metadata. Keys are compared
-    by (type, base64), so a different comment never counts as a change.
-    """
     have = {_key_id(k): k.strip() for k in _SOPS_RECIPIENT_RE.findall(sops_file_text)}
     want = {_key_id(k): " ".join(k.split()[:2]) for k in wanted}
     add = [want[i] for i in sorted(want, key=str) if i not in have]
@@ -130,8 +100,6 @@ def recipient_changes(sops_file_text: str, wanted: list[str]) -> tuple[list[str]
 
 
 def sops_env() -> dict[str, str]:
-    """The environment sops runs in: its own discovery, with this machine's ssh key
-    pinned when one exists (so an rsa-only user isn't forced onto ed25519)."""
     env = dict(os.environ)
     ssh_key = next(
         (p for p in (Path.home() / ".ssh" / "id_ed25519", Path.home() / ".ssh" / "id_rsa")
@@ -145,13 +113,6 @@ def sops_env() -> dict[str, str]:
 
 def sync_recipients(conf: Conf, env_name: str, *, sops: Path | None = None,
                     env: dict[str, str] | None = None) -> tuple[int, int] | None:
-    """Make the committed secrets file readable by exactly the conf's keys.
-
-    `sops edit --age …` only chooses recipients when it creates a file, so a key
-    added to (or dropped from) the conf has to be applied with `sops rotate` — by a
-    machine that can already decrypt. Returns (added, removed), or None when there is
-    no encrypted file or nothing to change. Prints one line when it rewrites the file.
-    """
     encrypted = paths.secrets_encrypted(conf, env_name)
     if not encrypted.is_file():
         return None

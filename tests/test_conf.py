@@ -7,10 +7,10 @@ from anci.conf import mem_to_kib, disk_to_qemu
 
 VALID = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [user.alice]
-ssh-pub-keys = ['ssh-ed25519 AAAA alice', 'ssh-ed25519 AAAA alice2']
+ssh-pub-keys = ['ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIaf051a93286a66eff487a0215bab9e9cf11b9c5d665 alice', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIb2836e36b8593ec68a9d9183eb868ddb0d5f674cb8e alice2']
 
 [env.dev]
 ip = '127.0.0.1'
@@ -103,7 +103,7 @@ class TestLoadValid(unittest.TestCase):
 
 PORTED = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.prod]
 ip = '203.0.113.10'
@@ -161,9 +161,56 @@ class TestValidation(unittest.TestCase):
             load_str(text)
         self.assertIn(fragment, str(cm.exception))
 
-    def test_exe_names_with_the_same_port_var_are_refused(self):
-        self.assert_conf_error(VALID + "\n[exe.my-api]\nsource = './a'\n[exe.my_api]\nsource = './b'\n",
-                               "ANCI_PORT_MY_API")
+    def test_control_characters_are_refused_anywhere(self):
+        self.assert_conf_error(VALID + "\n[exe.x]\nsource = './x'\nenv-vars = { A = \"x\\nUser=root\" }\n",
+                               "exe.x.env-vars.A")
+        self.assert_conf_error(VALID + "\n[exe.x]\nsource = './x'\nschedule = \"hourly\\tx\"\n",
+                               "control character")
+        self.assert_conf_error(VALID + '\n[exe."a\\nb"]\nsource = "./x"\n', "control character")
+
+    def test_reserved_names_are_refused_for_every_kind(self):
+        self.assert_conf_error(VALID.replace("[user.alice]", "[user.anci]")
+                               .replace("'jack', 'alice'", "'jack', 'anci'"), "reserved")
+        self.assert_conf_error(VALID.replace("[user.alice]", "[user.root]")
+                               .replace("'jack', 'alice'", "'jack', 'root'"), "reserved")
+        self.assert_conf_error(VALID + "\n[db.caddy]\nmigrations = './m'\n", "reserved")
+        for name in ("ssh", "sshd", "networking", "systemd-networkd"):
+            self.assert_conf_error(VALID + f"\n[exe.{name}]\nsource = './x'\n", "reserved")
+
+    def test_env_vars_need_valid_names_outside_anci_s(self):
+        for key, fragment in (("ANCI_PORT", "is anci's"), ("anci_x", "is anci's"),
+                              ('"1BAD"', "isn't a valid name"), ('"A-B"', "isn't a valid name")):
+            with self.subTest(key=key):
+                self.assert_conf_error(VALID + f"\n[exe.x]\nsource = './x'\nenv-vars = {{ {key} = 'v' }}\n",
+                                       fragment)
+        self.assert_conf_error(VALID.replace("EXTRA = 'yes'", "ANCI_URL = 'x'"),
+                               "[exe.app.env.dev]: env-var 'ANCI_URL' is anci's")
+
+    def test_a_key_is_one_well_formed_public_key(self):
+        key = VALID.split("[user.jack]\nssh-pub-keys = '")[1].split("'")[0]
+        for bad in ("not a key", "ssh-ed25519", "ssh-ed25519 !!!!", f"ssh-rsa {key.split()[1]}",
+                    f'command="echo hi" {key}'):
+            with self.subTest(key=bad):
+                self.assert_conf_error(VALID.replace(key, bad), "isn't a public key")
+
+    def test_two_users_cant_share_a_key(self):
+        key = VALID.split("[user.jack]\nssh-pub-keys = '")[1].split("'")[0]
+        self.assert_conf_error(VALID + f"\n[user.cy]\nssh-pub-keys = '{key.split()[0]} {key.split()[1]} cy'\n",
+                               "is also [user.jack]'s")
+
+    def test_vm_sizes_have_limits(self):
+        vm = "vcpus = 2, mem = '2gb', disk = '20gb'"
+        for bad in ("vcpus = 0, mem = '2gb', disk = '20gb'", "vcpus = 256, mem = '2gb', disk = '20gb'",
+                    "vcpus = 2, mem = '256mb', disk = '20gb'", "vcpus = 2, mem = '2gb', disk = '2gb'"):
+            with self.subTest(vm=bad):
+                self.assert_conf_error(VALID.replace(vm, bad), "[env.dev.vm]")
+        load_str(VALID.replace(vm, "vcpus = 1, mem = '512mb', disk = '4gb'"))
+
+    def test_a_host_is_a_hostname(self):
+        for bad in ("a b", "app.example.com {", "App.example.com", "-x.com"):
+            with self.subTest(host=bad):
+                self.assert_conf_error(VALID + f"\n[exe.worker.env.prod]\nhost = '{bad}'\n",
+                                       "isn't a hostname")
 
     def test_replication_defaults_and_opt_in(self):
         conf = load_str(VALID + """
@@ -366,7 +413,7 @@ region = 'eu-west-1'
         # non-table form on an exe without env subtables.
         minimal = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.dev]
 ip = '127.0.0.1'
@@ -401,7 +448,7 @@ access-users = ['jack']
 vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }
 
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 """
         self.assert_conf_error(minimal, "reserved")
 
@@ -437,7 +484,7 @@ class TestModeAndVersion(unittest.TestCase):
 
     LOCAL = """
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.dev]
 ip = '127.0.0.1'
@@ -500,7 +547,7 @@ access-users = ['jack']
 anci-version = '0.0.1'
 
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.prod]
 ip = '10.0.0.5'
@@ -521,13 +568,13 @@ vm = { vcpus = 4, mem = '8gb', disk = '40gb' }
     def test_names_that_reach_the_box_are_validated(self):
         import json
 
-        def conf(user="jack", env="dev", exe="web.v2", db="main-db"):
+        def conf(user="jack", env="dev", exe="web-v2", db="main-db"):
             q = json.dumps   # a TOML basic string: valid as a key and a value
             return load_str(f"""
 anci-version = '0.0.1'
 
 [user.{q(user)}]
-ssh-pub-keys = 'ssh-ed25519 AAAA k'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI72ba82c46560c47f070c1ada767277bc694dea48fd1 k'
 
 [env.{q(env)}]
 ip = '127.0.0.1'
@@ -544,7 +591,8 @@ migrations = './m'
         conf()   # the happy path still loads
         for field, bad in (("user", "Jack"), ("user", "o'neil"), ("user", "a b"),
                            ("env", ".."), ("db", "../etc"), ("db", "a b"),
-                           ("exe", ".."), ("exe", "-x")):
+                           ("exe", ".."), ("exe", "-x"), ("exe", "web.v2"), ("exe", "Web"),
+                           ("db", "a_b"), ("db", "1db"), ("env", "e" * 33)):
             with self.subTest(**{field: bad}), self.assertRaises(ConfError) as cm:
                 conf(**{field: bad})
             self.assertIn(f"invalid {field} name", str(cm.exception))
@@ -555,7 +603,7 @@ migrations = './m'
 anci-version = '0.0.1'
 
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.prod]
 ip = '203.0.113.10'
@@ -581,7 +629,7 @@ host = 'x.example.com'
 anci-version = '0.0.1'
 
 [user.jack]
-ssh-pub-keys = 'ssh-ed25519 AAAA jack'
+ssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack'
 
 [env.dev]
 ip = '{env_ip}'

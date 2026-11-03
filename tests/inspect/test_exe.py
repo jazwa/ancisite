@@ -97,7 +97,8 @@ class TestExe(unittest.TestCase):
         self._deploy(conf)
         link(layout.static_link("app"), layout.static_version("app", "4be07a1c9d3f2e18"))
         [change] = self._diff(conf)
-        self.assertEqual(change.fields, {"static": ("4be07a1c9d3f2e18", None)})
+        # that version was never built here: it reads as broken, and still goes
+        self.assertEqual(change.fields, {"static": ("broken", None)})
 
 
 if __name__ == "__main__":

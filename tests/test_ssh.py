@@ -276,7 +276,7 @@ class TestMux(unittest.TestCase):
         from anci.conf import load
         fd = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
         fd.write(
-            "[user.jack]\nssh-pub-keys = 'k'\n\n"
+            "[user.jack]\nssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b'\n\n"
             "[env.dev]\nip = '127.0.0.1'\naccess-users = ['jack']\n"
             "vm = { anci-version = '0.0.1', vcpus = 2, mem = '1gb', disk = '20gb' }\n"
         )
@@ -320,11 +320,11 @@ class TestMux(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.dict("os.environ", {"XDG_RUNTIME_DIR": td}):
             p = Path(td) / "anci.toml"
-            p.write_text("[user.jack]\nssh-pub-keys = 'k'\n\n"
+            p.write_text("[user.jack]\nssh-pub-keys = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI2cd858682e6ccd72649c36334d147d3b0905e2e950b'\n\n"
                          "[env.prod]\nip = '203.0.113.10'\naccess-users = ['jack']\n"
                          "mode = 'adopt'\nvm = { anci-version = '0.0.1' }\n")
             (Path(td) / "envs" / "prod").mkdir(parents=True)
-            (Path(td) / "envs" / "prod" / "hostkey").write_text("203.0.113.10 ssh-ed25519 AAAA\n")
+            (Path(td) / "envs" / "prod" / "hostkey").write_text("203.0.113.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI63c1dd951ffedf6f7fd968ad4efa39b8ed584f162f4\n")
             conn = ssh.connect(load(str(p)), "prod", "jack")
         self.assertFalse(conn.boots)
 

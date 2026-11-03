@@ -17,9 +17,8 @@ def plan(conf: Conf, env_name: str) -> None:
     builds = local_builds(conf, env_name, sorted(conf.exes), skip_unbuilt=True)
     user = auth.authorize(conf, env_name)
     conf_only, with_builds, observed = look(conf, env_name, ssh.connect(conf, env_name, user), builds)
-    by_reconcile = diff(observed, conf_only)     # what `reconcile` / `up` would change
-    changes = worth_showing(diff(observed, with_builds))   # …and `deploy`, with your builds
-    # the VM's size lives with libvirt, not on the box: `up` / `reconcile` resize it
+    by_reconcile = diff(observed, conf_only)
+    changes = worth_showing(diff(observed, with_builds))
     from ..providers.libvirt import vm_differences
     vm = vm_differences(conf, env_name)
     if vm:

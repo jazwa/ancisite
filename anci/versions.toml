@@ -1,33 +1,15 @@
-# The anci-version mapping.
-#
-# One key (`anci-version` in an env's `vm = { … }` config) resolves to the whole
-# software supply chain. This file is bundled with anci and is NOT user-facing: to
-# move to a newer stack, cut a new version here rather than letting users pin
-# individual components.
-
 ["0.0.1"]
-# debian-13 "trixie" generic cloud image, 2026-10-01 build (SHA512SUMS from cloud.debian.org)
 debian-image-url = "https://cloud.debian.org/images/cloud/trixie/20261001-2618/debian-13-generic-amd64-20261001-2618.qcow2"
 sha512 = "6f0f93335bdef4ccf523c4317cc663ea52ca23b862667785f3d6d186ab4674a937385ccff0c55996b4b2e4c19e440cdf211e2a75ffa2f6548037ab43950c841d"
-# 0.5.x replicates LTX files (0.3.x used generations of WAL segments; the two replica formats differ)
 litestream = "0.5.17"
 litestream-url = "https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz"
-# sha256 from the release's checksums.txt (cross-checked against the downloaded tarball)
 litestream-sha256 = "cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d"
 caddy = "2.11.7"
-# tar.gz containing the `caddy` binary; verified against caddy's published checksums (sha512)
 caddy-url = "https://github.com/caddyserver/caddy/releases/download/v2.11.7/caddy_2.11.7_linux_amd64.tar.gz"
 caddy-sha512 = "a7a433a1b133efc3c8d10eb0b99d52a24b5ef5c322dc77f5282182b1c0402139ab83f3a99f0c52409df77d20123fb0b523edad8a66d8f5e49136197bf61ef0e7"
-# sqlite-tools "Precompiled Binaries for Linux" (x86_64) from sqlite.org; the zip's
-# sha3-256 was matched against the published value on download.html, and the sha256
-# pinned here is of that verified zip (bin.py verifies the sha256; glibc-dynamic, so
-# it runs on any glibc distro — the arch/libc floor the vendored litestream/caddy share)
 sqlite = "3.54.1"
 sqlite-url = "https://sqlite.org/2026/sqlite-tools-linux-x64-3540100.zip"
 sqlite-sha256 = "a21062b333c7d66d7d8c42054c0fab1c1899729185289ad14bd4f25f9f576d14"
-# vendored dev-machine-side (secrets decryption): one build per platform the anci CLI
-# ships for (keys as in anci-install.sh); sha256s from upstream's
-# sops-v3.13.3.checksums.txt (cross-checked against the downloaded binaries)
 sops = "3.13.3"
 
 ["0.0.1".sops-builds.linux-x86_64]

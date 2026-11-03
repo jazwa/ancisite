@@ -23,23 +23,19 @@ from .singletons import CADDY_MARKER, LITESTREAM_MARKER, caddy_restart, litestre
 
 @dataclass(frozen=True)
 class Binary:
-    dest: str                    # where the box runs it from
+    dest: str
     url: str
-    name: str                    # local cache name
-    extract: str                 # its member in the downloaded archive
+    name: str
+    extract: str
     sha256: str | None = None
     sha512: str | None = None
 
     def fetch(self) -> Path:
-        """The binary, downloaded once into the local cache and verified."""
         return bin_mod.vendor(self.url, self.sha512, self.sha256, self.name,
                               paths.bin_cache_dir(), extract=self.extract)
 
 
 def binaries(conf, env_name: str) -> dict[str, Binary]:
-    """field -> the binary the env's anci-version pins. A version without a URL
-    for one leaves it out (using it is an error elsewhere: caddy, litestream,
-    migrate)."""
     env = conf.envs[env_name]
     e = versions_mod.get(versions_mod.load(), env.anci_version)
     out = {}
@@ -62,9 +58,8 @@ _DESTS = {"caddy": layout.CADDY_BIN, "litestream": layout.LITESTREAM_BIN, "sqlit
 class Vendored(Resource):
     name = "vendored"
     fields = frozenset(_DESTS)
-    # always on the box: a field changes, it's never created or deleted
     rows = {f: f for f in _DESTS}
-    rules = (("vendored/*", "*/restart"), ("vendored/*", "*/start"))   # a new binary, then its restart
+    rules = (("vendored/*", "*/restart"), ("vendored/*", "*/start"))
 
     def blobs(self, target, inputs):
         return sorted(v for v in target.get("vendored", {}).values() if v)
@@ -74,7 +69,6 @@ class Vendored(Resource):
                              for f, b in binaries(conf, env_name).items()}}
 
     def probes(self):
-        # resolved (-e): a blob gone from the store reads as not installed
         return {f: f"readlink -e {shlex.quote(dest)}" for f, dest in _DESTS.items()}
 
     def observed(self, found):
@@ -86,7 +80,6 @@ class Vendored(Resource):
         for f in sorted(self.rows_for(change)):
             b = binaries(ctx.conf, ctx.env_name)[f]
             local = b.fetch()
-            # a running caddy/litestream keeps the old binary until it restarts
             mark = {"caddy": CADDY_MARKER, "litestream": LITESTREAM_MARKER}.get(f)
             touch = f"touch {mark}\n" if mark and f in ctx.observed else ""
             out.append(Step(f"vendored/{f}", touch + link(b.dest, ctx.uploads.blob(local, sha256_file(local)))))

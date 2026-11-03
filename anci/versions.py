@@ -12,7 +12,7 @@ from . import errors
 _VERSIONS_NAME = "versions.toml"
 
 
-VersionError = errors.ConfError   # a bad/unknown version is a conf problem
+VersionError = errors.ConfError
 
 
 @dataclass
@@ -30,17 +30,10 @@ class VersionEntry:
     sqlite_url: str | None
     sqlite_sha256: str | None
     sops: str | None
-    # dev-machine platform ("macos-aarch64", …) -> (url, sha256)
     sops_builds: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 def load(path: Path | str | None = None) -> dict[str, VersionEntry]:
-    """Load a versions map, or the bundled one when `path` is None.
-
-    The bundled file is read through `importlib.resources`, not a filesystem
-    path, so it also works from a zipapp (where the package lives inside the
-    archive and a plain `open()` on `__file__`'s directory would fail).
-    """
     if path is None:
         text = resources.files(__package__ or "anci").joinpath(
             _VERSIONS_NAME
@@ -55,7 +48,6 @@ def load(path: Path | str | None = None) -> dict[str, VersionEntry]:
         url = v.get("debian-image-url")
         if not isinstance(url, str) or not url:
             raise VersionError(f"versions.toml: [{version}] missing 'debian-image-url'")
-        # every other field but sops-builds is an optional string under its dashed key
         optional = {}
         for f in fields(VersionEntry)[2:-1]:
             key = f.name.replace("_", "-")

@@ -28,7 +28,6 @@ _ANSI = _detect_ansi()
 
 
 def set_ansi(enabled: bool) -> None:
-    """Override detection (tests, --no-color)."""
     global _ANSI
     _ANSI = enabled
 
@@ -41,12 +40,10 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _visible_len(s: str) -> int:
-    """Display width of `s`, ignoring ANSI color escapes."""
     return len(_ANSI_RE.sub("", s))
 
 
 def _pad(s: str, width: int) -> str:
-    """Left-justify `s` to `width` visible columns (ANSI-aware)."""
     return s + " " * max(0, width - _visible_len(s))
 
 
@@ -64,28 +61,18 @@ def human_size(n: int) -> str:
     return f"{n} B"
 
 
-# ---------------------------------------------------------------------------
-# step lines
-
-
 class Step:
-    """One pipeline step: prints `→ label`, rewrites to ✓/✗ on completion.
-
-    Every completion stamps the step's duration on the right — slow deploys
-    explain themselves per step instead of only a whole-run total.
-    """
 
     def __init__(self, label: str):
         self.label = label
         self.t0 = time.monotonic()
         self._running_shown = False
         if _ANSI:
-            sys.stdout.write(f"  {dim('→')} {label}\n")  # placeholder line
+            sys.stdout.write(f"  {dim('→')} {label}\n")
             sys.stdout.flush()
             self._running_shown = True
 
     def note(self, text: str) -> None:
-        """Say what the running step is doing (e.g. how much it's uploading)."""
         line = f"  {dim('→')} {self.label}  {dim(text)}"
         if _ANSI:
             self._rewrite(line)
@@ -95,7 +82,7 @@ class Step:
 
     def _rewrite(self, line: str) -> None:
         if _ANSI and self._running_shown:
-            sys.stdout.write(f"\x1b[1A\x1b[2K")  # up one line, clear it
+            sys.stdout.write(f"\x1b[1A\x1b[2K")
         sys.stdout.write(line + "\n")
         sys.stdout.flush()
         self._running_shown = False
@@ -119,7 +106,6 @@ class Step:
 
 
 class Pipeline:
-    """A command pipeline that prints step-by-step progress."""
 
     def __init__(self):
         self.t0 = time.monotonic()
@@ -132,12 +118,7 @@ class Pipeline:
         print(f"\n  {dim(f'{note} in {elapsed:.1f}s')}")
 
 
-# ---------------------------------------------------------------------------
-# spinner (for guest waits)
-
-
 class Spinner:
-    """Time-based spinner on the current line. No-op without ANSI."""
 
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
@@ -171,26 +152,16 @@ class Spinner:
         self.stop()
 
 
-# ---------------------------------------------------------------------------
-# error rendering (taxonomy voice: what / why / try)
-
-
 def error(err) -> None:
-    """Render a taxonomy Error (anci/errors.py) to stderr."""
     print(f"{red('error:')} {err.what}", file=sys.stderr)
     if err.why:
-        for line in err.why.splitlines():   # a multi-line why: one indented line each
+        for line in err.why.splitlines():
             print(f"  {dim(line)}", file=sys.stderr)
     if err.try_:
         print(f"  {bold('try:')} {err.try_}", file=sys.stderr)
 
 
-# ---------------------------------------------------------------------------
-# boxed table (status home screen)
-
-
 def table(headers: list[str], rows: list[list[str]]) -> str:
-    """A minimal fixed-width boxed table. Plain separators without ANSI."""
     all_rows = [headers] + rows
     widths = [max(_visible_len(r[i]) for r in all_rows) for i in range(len(headers))]
 
@@ -208,19 +179,12 @@ def table(headers: list[str], rows: list[list[str]]) -> str:
 
 def confirm(heading: str, details: list[str], question: str, *, force: bool = False,
             no_tty_error: Exception | None = None, stdin=None) -> bool:
-    """The one look for every "are you sure": a red WARNING block, then a red
-    `[y/N]` question. Always printed, so even `--force` leaves a record of what it
-    was about to do; `force` just skips the question.
-
-    Without a terminal (and without an injected `stdin`) there is nobody to ask:
-    raise `no_tty_error` — the caller words it, since only some verbs take --force.
-    """
     print(f"\n  {red(bold('WARNING'))}{red(' — ' + heading)}")
     for line in details:
         print("  " + red(line))
     if force:
         return True
-    print()   # air between the warning and the question
+    print()
     if stdin is not None:
         answer = stdin.readline().strip()
     else:

@@ -21,11 +21,6 @@ from .conf import Conf
 
 
 def authorize(conf: Conf, env_name: str) -> str:
-    """Who is the caller, and may they target this env?
-
-    Returns the conf username. Raises AuthError when the key isn't in the conf
-    or the user lacks access to the env.
-    """
     if env_name not in conf.envs:
         raise errors.ConfError(f"env '{env_name}' isn't in anci.toml")
     user = identify_user(conf)
@@ -45,11 +40,6 @@ def authorize(conf: Conf, env_name: str) -> str:
 
 
 def identify_user(conf: Conf) -> str:
-    """Which conf user is deploying? Match local public keys against the conf.
-
-    Client-side only (the ssh key IS the identity). Falls back to "?" when no
-    conf user's key matches; `auth.authorize` turns that into a hard failure.
-    """
     local_keys: set[str] = set()
     try:
         out = subprocess.run(
@@ -59,8 +49,6 @@ def identify_user(conf: Conf) -> str:
             local_keys.update(l.strip() for l in out.stdout.splitlines() if l.strip())
     except (OSError, subprocess.TimeoutExpired):
         pass
-    # ANCI_SSH_KEY points at the identity's .pub file for CI/service accounts
-    # (no agent, nonstandard path); ~/.ssh/*.pub covers normal setups.
     candidates: list[Path] = []
     override = os.environ.get("ANCI_SSH_KEY")
     if override:
@@ -82,8 +70,5 @@ def identify_user(conf: Conf) -> str:
 
 
 def _key_id(line: str) -> tuple[str, str] | None:
-    """A public key's identity: (type, base64). The trailing comment
-    (`jack@dev-machine`) is a label, not part of the key — conf and local files
-    routinely differ there."""
     parts = line.split()
     return (parts[0], parts[1]) if len(parts) >= 2 else None

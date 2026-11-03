@@ -17,12 +17,6 @@ from ..inspect.exe import deploy_inputs
 from ..inspect.run import converge
 
 
-
-# ---------------------------------------------------------------------------
-# app-binary portability guard: refuse a binary the amd64 guest can't run *before*
-# uploading it (otherwise it fails later as a runtime "Exec format error"). Pure
-# stdlib and header-only — no `file`/`readelf` dependency.
-
 _ELF_MAGIC = b"\x7fELF"
 _ELF_VMS = {
     3: "x86 (32-bit)",
@@ -39,19 +33,13 @@ _MACH_O_MAGICS = (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
 
 
 def binary_arch(path) -> str | None:
-    """Architecture family of an app binary, read from its header.
-
-    Returns a name ("x86_64", "arm64", "script", "mach-o", …) or None if there's
-    no recognizable header. Only ELF is arch-specific; a `#!` script is
-    arch-agnostic (the guest's interpreter decides).
-    """
     with path.open("rb") as f:
         head = f.read(20)
     if head[:2] == b"#!":
         return "script"
     if head[:4] == _ELF_MAGIC and len(head) >= 20:
-        endian = "<" if head[5] == 1 else ">"  # EI_DATA
-        vm = struct.unpack(endian + "H", head[18:20])[0]  # e_vm
+        endian = "<" if head[5] == 1 else ">"
+        vm = struct.unpack(endian + "H", head[18:20])[0]
         return _ELF_VMS.get(vm, f"elf-{vm}")
     if head[:4] in _MACH_O_MAGICS:
         return "mach-o"
@@ -63,12 +51,6 @@ def binary_arch(path) -> str | None:
 
 
 def check_app_arch(path) -> None:
-    """Raise AppError unless `path` is an x86_64 ELF binary.
-
-    anci deploys native binaries, not scripts: a `#!` script would need its
-    interpreter installed on the guest — a whole class of "works on my dev machine"
-    failures — so it's refused up front.
-    """
     arch = binary_arch(path)
     if arch == "x86_64":
         return
@@ -109,7 +91,6 @@ def _require_exe(conf: Conf, exe_name: str) -> None:
 
 
 def _local_source(conf: Conf, exe_name: str, env_name: str):
-    """The exe's local binary for this env, per its conf `source`."""
     resolved = conf.exes[exe_name].resolve_for(env_name)
     p = conf_path(conf, resolved.source)
     if not p.is_file():
@@ -122,7 +103,6 @@ def _local_source(conf: Conf, exe_name: str, env_name: str):
 
 
 def _local_static(conf: Conf, exe_name: str, env_name: str) -> staticfiles.Scanned:
-    """Scan the exe's local static dir for this env, per its conf `static`."""
     resolved = conf.exes[exe_name].resolve_for(env_name)
     p = conf_path(conf, resolved.static)
     if not p.is_dir():
@@ -135,9 +115,6 @@ def _local_static(conf: Conf, exe_name: str, env_name: str) -> staticfiles.Scann
 
 
 def deploy(conf: Conf, exe_name: str | None, env_name: str) -> str:
-    """Ship `exe_name` (None: every exe) to `env_name`, then converge the env
-    once. Every exe's bytes are gathered and checked before the box is touched,
-    so one bad exe ships none of them."""
     names = [exe_name] if exe_name is not None else sorted(conf.exes)
     if not names:
         raise errors.ConfError("there are no exes to deploy",
@@ -148,15 +125,11 @@ def deploy(conf: Conf, exe_name: str | None, env_name: str) -> str:
         raise errors.ConfError(f"env '{env_name}' isn't in anci.toml")
     auth.authorize(conf, env_name)
 
-    # only these exes get new bytes; any other exe keeps what's deployed
     return converge(conf, env_name, inputs=local_builds(conf, env_name, names))
 
 
 def local_builds(conf: Conf, env_name: str, names: list[str], *,
                  skip_unbuilt: bool = False) -> dict:
-    """What `deploy` ships for `names`: each exe's local binary (checked it can
-    run on the box) and static files, as a converge's inputs. `plan` reads the
-    same, with `skip_unbuilt`: an exe with no build yet is left out, not an error."""
     binaries, statics, source = {}, {}, {}
     for name in names:
         resolved = conf.exes[name].resolve_for(env_name)
@@ -176,18 +149,14 @@ def local_builds(conf: Conf, env_name: str, names: list[str], *,
 
 
 def log_script(log_file: str, *, follow: bool, lines: int = 50) -> str:
-    """Shell printing the last `lines` of an exe's log — continuing into the rotated
-    `<log>.1` when the current file is short (just after the hourly trim) — then,
-    with `follow`, following the current file. Reads only the files' ends."""
     f = shlex.quote(log_file)
     script = f"{{ tail -n {lines} {f}.1 2>/dev/null; tail -n {lines} {f}; }} | tail -n {lines}"
     return script + (f"\nexec tail -n 0 -F {f}" if follow else "")
 
 
 def app_logs(conf: Conf, exe_name: str, env_name: str, *, follow: bool) -> None:
-    """`anci <env> logs` — the per-exe log file, with a journalctl fallback."""
     _require_exe(conf, exe_name)
-    user = auth.authorize(conf, env_name)  # logs may contain secrets; gate them
+    user = auth.authorize(conf, env_name)
     conn = ssh.connect(conf, env_name, user)
     unit = units.service_name(exe_name)
     log_file = layout.log_path(exe_name)
@@ -197,11 +166,11 @@ def app_logs(conf: Conf, exe_name: str, env_name: str, *, follow: bool) -> None:
         args = ["sudo", "-n", "journalctl", "-u", unit, "--no-pager", "-q"]
         args += ["-f"] if follow else ["-n", "50"]
     try:
-        proc = subprocess.run(conn.argv(args))  # stream, no capture: -f must flow
+        proc = subprocess.run(conn.argv(args))
         if proc.returncode != 0:
             raise errors.EnvError(
                 f"couldn't read logs for {exe_name} on {env_name}",
                 try_=f"check the app is deployed: anci {env_name} deploy {exe_name}",
             )
     except KeyboardInterrupt:
-        pass  # following: ctrl-c is the normal exit
+        pass

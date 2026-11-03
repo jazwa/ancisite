@@ -43,7 +43,6 @@ def _read_owner(route_lines: list[str]) -> str | None:
 
 
 def _bridge(hv: Hypervisor) -> str:
-    """The `default` network's bridge (virbr0 unless someone renamed it)."""
     for line in (hv.virsh("net-info", "default", check=False).stdout or "").splitlines():
         if line.strip().lower().startswith("bridge:"):
             return line.split(":", 1)[1].strip() or "virbr0"
@@ -51,8 +50,6 @@ def _bridge(hv: Hypervisor) -> str:
 
 
 def reconcile(conf: Conf, env_name: str, user: str) -> str | None:
-    """Make the env's host forward :80/:443 to its box iff the box serves a
-    `host`. Returns a step detail, or None when there's nothing to publish."""
     env = conf.envs[env_name]
     hv = Hypervisor(f"{user}@{env.ip}")
     bid = paths.box_id(conf)
@@ -88,8 +85,6 @@ def reconcile(conf: Conf, env_name: str, user: str) -> str | None:
         hv.root(f"mkdir -p {q(path.rsplit('/', 1)[0])} && cat > {q(path)} && chmod {mode} {q(path)}",
                 f"writing {path} on the host", input=text)
     if HOOK_FILE in changed:
-        # libvirt only scans its hooks dir at daemon start; running guests survive
         hv.root("systemctl try-restart libvirtd virtnetworkd", "reloading libvirt's hooks")
-    # always (re)apply: cheap, and heals rules libvirt rebuilt without us
     hv.root(APPLY_SCRIPT, "applying the host's edge")
     return f"80/443 → {vm_ip}" if changed else "unchanged"

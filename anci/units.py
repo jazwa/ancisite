@@ -13,13 +13,13 @@ from __future__ import annotations
 
 CADDY_UNIT = "caddy.service"
 LITESTREAM_UNIT = "litestream.service"
-LOGTRIM_SERVICE = "anci-logtrim.service"   # keeps /var/log/anci/*.log bounded
+LOGTRIM_SERVICE = "anci-logtrim.service"
 LOGTRIM_TIMER = "anci-logtrim.timer"
 MECHANISM_UNITS = {CADDY_UNIT, LITESTREAM_UNIT, LOGTRIM_SERVICE, LOGTRIM_TIMER}
 
 
 def service_name(exe_name: str) -> str:
-    return f"{exe_name}.service"   # exe names are validated (conf.py)
+    return f"{exe_name}.service"
 
 
 def timer_name(exe_name: str) -> str:

@@ -37,26 +37,18 @@ from ..layout import ANCI_USER
 from ..conf import Conf, allocate_ports
 
 
-# the checklist's services (caddy, litestream), by their unit
 _SERVICES = {r.unit: r for r in optional_services()}
 
 
 def _mech_units(conf: Conf, env_name: str) -> list[str]:
-    """The mechanism units desired on this box (litestream, caddy): those their
-    resources want, so a listed unit the box doesn't have is genuinely missing."""
     return sorted(u for u, r in _SERVICES.items() if r.wanted(conf, env_name))
 
 
 def _probes(conf: Conf, exe_names: list[str], env_name: str, ports: dict) -> dict[str, str]:
-    """The health facts status reads besides box inspection's (what runs, how
-    it's doing), keyed for `_read`."""
     p: dict[str, str] = {}
     for exe_name in exe_names:
         resolved = conf.exes[exe_name].resolve_for(env_name)
         if resolved.schedule is not None:
-            # a job is "up" when its timer is armed; report when it next fires.
-            # NextElapseUSecRealtime is momentarily empty while the triggered
-            # service runs, so fall back to computing it from the schedule.
             timer = units.timer_name(exe_name)
             p[f"{exe_name} timer"] = f"systemctl is-active {timer}"
             p[f"{exe_name} next"] = (
@@ -64,9 +56,6 @@ def _probes(conf: Conf, exe_names: list[str], env_name: str, ports: dict) -> dic
                 f'[ -z "$n" ] && n=$(systemd-analyze calendar {shlex.quote(resolved.schedule)} '
                 f'| sed -n "s/^ *Next elapse: //p"); [ -n "$n" ] && echo "$n"'
             )
-            # how its last run went: running / succeeded / failed, nothing when it hasn't run
-            # (since boot). The exit timestamp tells a finished run from a never-run unit,
-            # whose Result is also "success".
             svc = units.service_name(exe_name)
             p[f"{exe_name} run"] = (
                 f"a=$(systemctl show {svc} -p ActiveState --value); "
@@ -81,33 +70,21 @@ def _probes(conf: Conf, exe_names: list[str], env_name: str, ports: dict) -> dic
             p[f"{exe_name} port"] = (
                 f"{ssh.port_probe_line(ports[(exe_name, env_name)])} && echo open"
             )
-            # live resource use (systemd accounting is on by default). cpu is a
-            # share of one core, from two CPUUsageNSec samples taken on the box
-            # (one round trip, ~{secs}s slower); mem is current bytes.
             p[f"{exe_name} cpu"] = (
                 f"a=$(systemctl show {svc} -p CPUUsageNSec --value); "
                 f"sleep {_CPU_SAMPLE_SECS}; "
                 f"b=$(systemctl show {svc} -p CPUUsageNSec --value); echo \"$a $b\""
             )
             p[f"{exe_name} mem"] = f"systemctl show {svc} -p MemoryCurrent --value"
-    # box-level use, each as "<used> <total>" bytes on one line: the disk anci's
-    # state lives on (total = used + available, so ext4's root-reserved blocks,
-    # which the anci user can't write, don't count) and ram (used = total -
-    # available, what pressure actually is)
+            p[f"{exe_name} restarts"] = f"systemctl show {svc} -p NRestarts --value"
     p["box disk"] = f"df -P -B1 {layout.VAR_DIR} | awk 'NR==2{{print $3, $3+$4}}'"
     p["box mem"] = ("awk '/^MemTotal:/{t=$2}/^MemAvailable:/{a=$2}"
                     "END{print (t-a)*1024, t*1024}' /proc/meminfo")
-    # each release line prefixed with its exe (like releases.read_all), so "last
-    # deploy" is attributed to the right exe on a multi-exe env
     rel_files = " ".join(f"{rel_mod.RELEASES_DIR}/{e}/releases.jsonl" for e in exe_names)
     p["releases"] = (f'for f in {rel_files}; do [ -f "$f" ] && '
                      f'sed "s|^|$(basename "$(dirname "$f")")\t|" "$f"; done')
     for unit in _mech_units(conf, env_name):
         p[f"{unit} active"] = f"systemctl is-active {unit}"
-    # what the box's litestream actually replicates, whatever anci.toml says:
-    # `<db path>\t<last successful sync>` per db it lists, from the daemon over its
-    # control socket (a local read, no S3). `last_sync_at` freezes while uploads
-    # fail and keeps ticking on an idle db; fractional seconds are dropped.
     p["litestream active"] = f"systemctl is-active {units.LITESTREAM_UNIT}"
     p["litestream dbs"] = (
         f"sudo -n -u {ANCI_USER} {layout.LITESTREAM_BIN} list -socket {layout.LITESTREAM_SOCKET} -json "
@@ -120,7 +97,6 @@ def _probes(conf: Conf, exe_names: list[str], env_name: str, ports: dict) -> dic
 
 
 def _db_probes(p: dict[str, str], db_name: str) -> None:
-    """Last migration (the guest's bookkeeping table) and size (data file + wal)."""
     f = layout.db_path(db_name)
     p[f"{db_name} last"] = (
         f"[ -f {f} ] && {dbs.sqlite3_cmd(f)} "
@@ -132,16 +108,12 @@ def _db_probes(p: dict[str, str], db_name: str) -> None:
 
 
 def _iso_utc(ts: str) -> str | None:
-    """systemd's 'Wed 2026-10-07 20:34:49 UTC' -> '2026-10-07T20:34:49Z'.
-
-    None for empty/'n/a'; anything unrecognized is left as-is.
-    """
     if ts in ("", "-", "n/a"):
         return None
     if "UTC" not in ts:
         return ts
     try:
-        _, rest = ts.split(" ", 1)  # drop the weekday (locale-proof)
+        _, rest = ts.split(" ", 1)
         dt = datetime.strptime(rest, "%Y-%m-%d %H:%M:%S UTC")
     except ValueError:
         return ts
@@ -152,22 +124,17 @@ def _int(v: str | None) -> int | None:
     return int(v) if v and v.isdigit() else None
 
 
-# seconds between the two CPU samples a status probe takes (shared by the probe
-# script and the percentage it's parsed into)
 _CPU_SAMPLE_SECS = 0.4
 
-# systemd's "unset" sentinel for a memory property (max uint64)
 _MEM_UNSET = (1 << 64) - 1
 
 
 def _mem(v: str | None) -> int | None:
-    """A systemd memory value in bytes, or None when unset (inactive service)."""
     n = _int(v)
     return n if n is not None and n != _MEM_UNSET else None
 
 
 def _pair(sample: str | None) -> tuple[int, int] | None:
-    """A box-stat probe's '<used> <total>' line → (used, total) bytes, or None."""
     if not sample:
         return None
     parts = sample.split()
@@ -177,7 +144,6 @@ def _pair(sample: str | None) -> tuple[int, int] | None:
 
 
 def _cpu_percent(sample: str | None) -> float | None:
-    """Two `CPUUsageNSec` samples '<a> <b>' → share of one core, or None."""
     if not sample:
         return None
     parts = sample.split()
@@ -189,29 +155,31 @@ def _cpu_percent(sample: str | None) -> float | None:
 
 @dataclass
 class ExeState:
-    current: str | None = None   # deployed blob id
-    active: bool = False         # service running
-    port: bool = False           # its port answers
-    timer: bool = False          # a job's timer is armed
-    next: str | None = None      # a job's next run (ISO UTC)
-    run: str | None = None       # a job's last run: running / succeeded / failed; None = hasn't run
-    cpu: float | None = None     # live cpu, share of one core (a service only)
-    mem: int | None = None       # current memory, bytes
+    current: str | None = None
+    active: bool = False
+    state: str | None = None
+    restarts: int | None = None
+    port: bool = False
+    timer: bool = False
+    next: str | None = None
+    run: str | None = None
+    cpu: float | None = None
+    mem: int | None = None
 
 
 @dataclass
 class MechState:
-    active: str | None           # systemctl is-active
-    enabled: bool                # it starts at boot
-    installed: bool              # its unit file exists
+    active: str | None
+    enabled: bool
+    installed: bool
 
 
 @dataclass
 class DbState:
-    last: str | None = None      # last applied migration
-    size: int | None = None      # bytes (db + wal); None = no db file
-    replicating: bool = False    # the box's litestream lists it (whatever the conf says)
-    replica_ts: str | None = None  # its last successful sync (RFC3339)
+    last: str | None = None
+    size: int | None = None
+    replicating: bool = False
+    replica_ts: str | None = None
 
     @property
     def exists(self) -> bool:
@@ -220,20 +188,17 @@ class DbState:
 
 @dataclass
 class Report:
-    """What the box said, shaped for the tables."""
     state: dict[str, ExeState]
-    releases: list[tuple[str, str]]     # (exe, jsonl line)
+    releases: list[tuple[str, str]]
     mech: dict[str, MechState]
     dbs: dict[str, DbState]
-    litestream_up: bool = False           # the litestream unit is running
-    disk: tuple[int, int] | None = None   # box state fs (used, usable) bytes
-    mem: tuple[int, int] | None = None    # box ram (used, total) bytes
+    litestream_up: bool = False
+    disk: tuple[int, int] | None = None
+    mem: tuple[int, int] | None = None
 
 
 def _read(observed: ObservedState, conf: Conf, exe_names: list[str],
           env_name: str) -> Report:
-    """The facts — box inspection's state, and this report's own probes
-    (`observed.extra`) — shaped for the report."""
     found = observed.extra
 
     def fact(key):
@@ -244,6 +209,8 @@ def _read(observed: ObservedState, conf: Conf, exe_names: list[str],
         state[e] = ExeState(
             current=deployed(observed, e),
             active=fact(f"{e} active") == "active",
+            state=fact(f"{e} active"),
+            restarts=_int(fact(f"{e} restarts")),
             port=fact(f"{e} port") == "open",
             timer=fact(f"{e} timer") == "active",
             next=_iso_utc(fact(f"{e} next") or ""),
@@ -275,7 +242,6 @@ def _read(observed: ObservedState, conf: Conf, exe_names: list[str],
 def _latest_release(
     release_lines: list[tuple[str, str]], exe_name: str, env_name: str
 ) -> dict | None:
-    """Most recent release record for one (exe, env) from prefixed jsonl (torn-safe)."""
     latest = None
     for exe_part, payload in release_lines:
         if exe_part != exe_name:
@@ -290,7 +256,6 @@ def _latest_release(
 
 
 def _box_changes(conf: Conf, env_name: str, observed: ObservedState) -> list[str]:
-    """`anci <env> plan`'s lines: everything on the box that differs from the conf."""
     try:
         target = target_state(conf, env_name)
     except errors.Error as err:
@@ -299,8 +264,6 @@ def _box_changes(conf: Conf, env_name: str, observed: ObservedState) -> list[str
 
 
 def _box_stat_lines(report: Report) -> list[str]:
-    """Box-level use, plain numbers (no grading): disk then mem, each line only
-    when its probe reported."""
     out = []
     for label, pair in (("disk", report.disk), ("mem", report.mem)):
         if pair is None:
@@ -313,13 +276,6 @@ def _box_stat_lines(report: Report) -> list[str]:
 
 
 def _mech_check(unit: str, m: MechState | None) -> str:
-    """One checklist line under the main table — plain systemd words.
-
-    Both mechanism units are just services; they share one vocabulary:
-    running / stopped / failed / not installed. `m` is None when the box
-    never reported this unit (probe gap, or box down) — then the line is a
-    gray dash, not a red lie.
-    """
     if m is None:
         return f"  {ui.dim('—')} {ui.dim(unit)}"
     raw = (m.active or "").strip()
@@ -341,7 +297,6 @@ def _mech_check(unit: str, m: MechState | None) -> str:
 
 
 def _parse_rfc3339(s: str) -> int | None:
-    """Epoch seconds from an RFC3339 timestamp (litestream emits UTC `…Z`)."""
     try:
         return int(datetime.fromisoformat(s).timestamp())
     except ValueError:
@@ -349,7 +304,6 @@ def _parse_rfc3339(s: str) -> int | None:
 
 
 def _duration_behind(seconds: int) -> str:
-    """`<n>d|h|m|s since last sync` — the single human form for every behind-value."""
     seconds = max(0, int(seconds))
     for div, unit in ((86400, "d"), (3600, "h"), (60, "m")):
         if seconds >= div:
@@ -358,12 +312,6 @@ def _duration_behind(seconds: int) -> str:
 
 
 def _behind(replica_ts: str | None) -> str | None:
-    """`<lag> since last sync`: now minus the replica's newest write, or None when unknown.
-
-    `replica_ts` is the daemon's `last_sync_at` (`litestream list`, a local socket
-    read — no S3). Measured against the clock, so a replica that stops
-    receiving (bad credentials, litestream down) climbs on its own.
-    """
     if not replica_ts:
         return None
     ts = _parse_rfc3339(replica_ts)
@@ -374,12 +322,6 @@ def _behind(replica_ts: str | None) -> str | None:
 
 def _replication_cell(conf: Conf, env_name: str, db_name: str, st: DbState,
                       litestream_up: bool = True) -> str:
-    """The db table's replication cell — what the box is doing, not what the conf
-    asks for (`_replication_notes` says when the two differ):
-
-    — (no db file) · <lag> since last sync (the box replicates it) · litestream
-    error (it should replicate, but the daemon is down or has never synced) · off.
-    """
     if not st.exists:
         return "—"
     if st.replicating:
@@ -389,14 +331,11 @@ def _replication_cell(conf: Conf, env_name: str, db_name: str, st: DbState,
 
 
 def _destination_cell(conf: Conf, env_name: str, db_name: str) -> str:
-    """The db table's destination cell: `bucket/path` the conf replicates it to on
-    this env (the same target `regen` restores from), or — when replication is off."""
     db = conf.dbs[db_name].resolve_for(env_name)
     return litestream.replica_target(db) if db.replication else "—"
 
 
 def _replication_notes(conf: Conf, env_name: str, report: "Report") -> list[str]:
-    """One line per db whose replication on the box differs from anci.toml."""
     notes = []
     for db_name, st in report.dbs.items():
         wanted = conf.dbs[db_name].resolve_for(env_name).replication is not None
@@ -410,21 +349,10 @@ def _replication_notes(conf: Conf, env_name: str, report: "Report") -> list[str]
 
 
 def _unset_caddy_line() -> str:
-    """Checklist line for an env that serves HTTP but has no caddy front.
-
-    The ✗ voice: the conf genuinely doesn't want caddy here (no `host`), but
-    the front is still the thing standing between a public URL and the guest —
-    so it's marked, a gray dash would pretend nothing owes the user anything.
-    """
     return f"  {ui.red('✗')} {ui.dim('caddy.service — not configured (no host)')}"
 
 
 def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
-    """One env's worth of the home screen: version, state, url, last deploy.
-
-    Scoped to the env by the CLI (`anci <env> status`); the caller's access is
-    checked here (an env they can't target reports that instead of state).
-    """
     if env_name not in conf.envs:
         raise errors.ConfError(f"env '{env_name}' isn't in anci.toml")
     env = conf.envs[env_name]
@@ -434,11 +362,8 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
     db_rows: list[list[str]] = []
     db_notes: list[str] = []
     drift: list[str] = []
-    changes: list[str] = []   # --debug: the box's differences from the conf (as `plan` shows them)
+    changes: list[str] = []
     mech_units = _mech_units(conf, env_name)
-    # a remote env with a long-running exe serves HTTP; if no `host` routes it
-    # through caddy, the front simply doesn't exist — note it so it's never
-    # invisible (a local env is reached through its localhost forward instead)
     serves_http = not env.local and any(
         conf.exes[e].resolve_for(env_name).schedule is None for e in conf.exes
     )
@@ -446,10 +371,9 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
         u == units.CADDY_UNIT for u in mech_units
     )
     mech_checks: list[str] = []
-    parsed: Report | None = None   # set once the box reports (access + reachable)
+    parsed: Report | None = None
     down = False
     caller = auth.identify_user(conf)
-    # the ssh hint renders at the bottom of the checklist, not up here
     hint = box.ssh_hint(conf, env_name, caller)
 
     exe_names = list(conf.exes)
@@ -458,7 +382,6 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
         print(ui.dim("this conf defines no exes or dbs"))
         return
     if caller == "?" or caller not in env.access_users:
-        # authz-aware degradation: the env exists, show nothing
         for exe_name in exe_names:
             rows.append([exe_name, ui.dim("no access"), "—", "—", "—", "—"])
         for db_name in db_names:
@@ -471,12 +394,10 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
             down = False
         except ssh.SSHError as e:
             if e.auth or e.host_key:
-                # the box answered but won't let us in — that's not "down";
-                # let the CLI taxonomy explain it (auth / host-key)
                 raise
             down = bool(e.unreachable)
             if down:
-                hint = None  # a down box has no login to suggest
+                hint = None
             parsed = _read(ObservedState(), conf, exe_names, env.name)
 
         for exe_name in exe_names:
@@ -489,7 +410,6 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
             scheduled = conf.exes[exe_name].resolve_for(env.name).schedule is not None
 
             if scheduled:
-                # a job has no port; "up" means its timer is armed, and its last run says how it went
                 if st.timer:
                     state_s = {"failed": ui.red("failed"), "running": ui.yellow("running"),
                                "succeeded": ui.green("succeeded")}.get(st.run, ui.green("scheduled"))
@@ -505,17 +425,17 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
                     state_s = ui.green("serving")
                 elif st.active:
                     state_s = ui.yellow("starting")
+                elif blob and st.state == "activating":
+                    state_s = ui.red(f"failing · restarted {st.restarts or 0}×")
+                elif blob and st.state == "failed":
+                    state_s = ui.red("failed")
                 elif blob:
                     state_s = ui.red("stopped")
                 else:
                     state_s = ui.dim("not deployed")
-                # the url is a report, not a promise: shown only when the box
-                # actually answers (the port probe already ran for the state cell)
                 url = (box.reachable_url(conf, exe_name, env.name, local_ports) or "—") \
                     if st.port else "—"
 
-            # resources: only for a running service — a job between runs has an
-            # empty cgroup, and there's nothing to show for one not deployed
             if scheduled or not st.active:
                 cpu_s = mem_s = "—"
             else:
@@ -533,18 +453,15 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
                     drift.append(f"{exe_name}: release log disagrees with the deployed version")
 
         if down:
-            # the box never reported; a gray dash per desired unit, no ✗ lies.
-            # litestream speaks through the db table's replication column now.
             mech_checks = [_mech_check(u, None) for u in mech_units
                            if u != units.LITESTREAM_UNIT]
-            # the destination is conf-derived, so it still shows for a down box
             for db_name in db_names:
                 db_rows.append([db_name, "—", "—", "—",
                                 _destination_cell(conf, env_name, db_name)])
         else:
             for unit in mech_units:
                 if unit == units.LITESTREAM_UNIT:
-                    continue  # per-db in the table below, not a unit line
+                    continue
                 m = parsed.mech.get(unit)
                 if m is not None:
                     mech_checks.append(_mech_check(unit, m))
@@ -561,10 +478,8 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
                 ])
             db_notes = _replication_notes(conf, env_name, parsed)
         if unset_caddy:
-            # conf-derived, not box-derived — shown even when the box is down
             mech_checks.append(_unset_caddy_line())
     if env.local and forward.healthy(conf, env_name) is False:
-        # the exes may be serving on the VM, but their localhost URLs are dead
         mech_checks.append(f"  {ui.red('✗')} localhost forward — down "
                            f"{ui.dim(f'(anci {env_name} up reloads it; asks for sudo)')}")
 
@@ -583,7 +498,6 @@ def status(conf: Conf, env_name: str, *, debug: bool = False) -> None:
         for line in mech_checks:
             print(line)
         if hint:
-            # a breath between the box facts and the login hint
             if box_stats or mech_checks:
                 print()
             print(f"  {ui.dim('ssh with ')}{hint}")

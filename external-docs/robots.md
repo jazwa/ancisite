@@ -136,6 +136,17 @@ bucket = 'my-bucket'
 
 The example above is a full dev → prod setup. Here's each section in detail.
 
+A few rules hold across the whole file:
+
+- No control characters (newlines, tabs, …) in any key or value.
+- Every user, env, exe and db name is lowercase letters, digits and `-`, starts with a letter, and is at most
+  32 characters. `root`, `anci`, `caddy`, `litestream`, `anci-logtrim`, `ssh`, `sshd`, `networking`,
+  `systemd-networkd`, `init` and `completion` are reserved.
+- `env-vars` names are valid env var names and don't start with `ANCI_`: those are anci's.
+- Each `ssh-pub-keys` entry is one whole line of a `.pub` file, and no two users share a key.
+- A VM has 1–255 `vcpus`, at least `512mb` of `mem` and at least `4gb` of `disk`.
+- A `host` is a plain hostname: lowercase letters, digits, `.` and `-`.
+
 ### `[user.<name>]` — who may deploy
 
 ```toml
@@ -473,8 +484,6 @@ Everything lives under three trees:
   the couriered `secrets.env`.
 - `/var/log/anci/` — each exe's output, `<exe>.log`. An hourly timer
   (`anci-logtrim`) keeps each under 1 GiB: a full log moves to `<exe>.log.1`.
-
-The exe names `caddy`, `litestream` and `anci-logtrim` are reserved.
 
 Accounts:
 

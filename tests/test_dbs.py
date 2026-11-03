@@ -140,8 +140,7 @@ class TestRenderers(unittest.TestCase):
                 bucket="backups")),
         ]
         out = litestream.render_litestream_yaml(dbs_list)
-        self.assertTrue(out.startswith("# rendered by anci"))
-        doc = json.loads(out.split("\n", 1)[1])   # JSON is valid YAML
+        doc = json.loads(out)   # JSON is valid YAML
         # the control socket status reads sync state from (no S3 round trip)
         self.assertEqual(doc["socket"], {"enabled": True, "path": "/run/litestream/litestream.sock"})
         main, analytics = doc["dbs"]

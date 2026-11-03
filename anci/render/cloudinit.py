@@ -10,14 +10,6 @@ from .shell import sudoers_line
 
 
 def render_userdata(users: dict[str, list[str]]) -> str:
-    """One guest account per conf user: their own account + `authorized_keys`
-    + passwordless sudo, in the shared `anci` group that owns `/var/lib/anci`.
-    The shared `anci` *service* user is created later, idempotently, by
-    `up`/`deploy`/`migrate` — not here.
-
-    The sudo grant is the very file anci's `user` resource writes and revokes
-    (`/etc/sudoers.d/anci-<name>`), not cloud-init's `sudo:` key, whose own
-    sudoers file anci would never see — a revoked user would keep sudo."""
     if not users:
         raise ValueError("no users: refusing to render a guest nobody can reach")
     doc = {
@@ -33,15 +25,11 @@ def render_userdata(users: dict[str, list[str]]) -> str:
             for name in users
         ],
         "ssh_pwauth": False,
-        # no packages: sqlite3/litestream/caddy ship vendored on the first
-        # converge, and static files go through the blob store over plain ssh
     }
     return "#cloud-config\n" + json.dumps(doc, indent=2) + "\n"
 
 
 def render_network_config(ip_cidr: str, mac: str, gateway: str) -> str:
-    """network-config (v2): a static address, matched by MAC so it survives NIC
-    renames — the static IP is why anci never needs to discover a lease."""
     doc = {"network": {"version": 2, "ethernets": {"nic": {
         "match": {"macaddress": mac},
         "dhcp4": False,

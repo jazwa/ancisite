@@ -18,4 +18,4 @@ differ per exe, and only that exe sees them.
 
 ## Overrides
 
-Your `env-vars` override every `ANCI_*` variable, and secrets override both.
+`env-vars` can't use `ANCI_` names: those are anci's. Secrets override `env-vars`.

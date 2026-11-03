@@ -177,16 +177,16 @@ class TestRenderUserdata(unittest.TestCase):
     def test_renders_one_account_per_user(self):
         ud = render_userdata(
             {
-                "jack": ["ssh-ed25519 AAAA a", "ssh-ed25519 AAAA b"],
-                "alice": ["ssh-ed25519 AAAA c"],
+                "jack": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI5064a8d508da9f415ed7476ad71d5b7a03a1605098c a", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe4a3381881dbfac98b3d0f3d53f63f005d0bf3268cb b"],
+                "alice": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI41985beffbeaf4229dd70403c10b376c558534e0bad c"],
             }
         )
         self.assertTrue(ud.startswith("#cloud-config\n"))
         doc = json.loads(ud.split("\n", 1)[1])   # JSON is valid YAML
         users = {u["name"]: u for u in doc["users"]}
         self.assertEqual(users["jack"]["ssh_authorized_keys"],
-                         ["ssh-ed25519 AAAA a", "ssh-ed25519 AAAA b"])
-        self.assertEqual(users["alice"]["ssh_authorized_keys"], ["ssh-ed25519 AAAA c"])
+                         ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI5064a8d508da9f415ed7476ad71d5b7a03a1605098c a", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIe4a3381881dbfac98b3d0f3d53f63f005d0bf3268cb b"])
+        self.assertEqual(users["alice"]["ssh_authorized_keys"], ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI41985beffbeaf4229dd70403c10b376c558534e0bad c"])
         self.assertEqual(users["jack"]["groups"], ["anci"])
         # sudo through the file anci's user resource owns (and revokes), not
         # cloud-init's `sudo:` key, whose sudoers file anci never sees
@@ -198,10 +198,10 @@ class TestRenderUserdata(unittest.TestCase):
 
     def test_key_comments_survive(self):
         # hand-built YAML once cut a key at " #" (a YAML comment); JSON can't
-        ud = render_userdata({"jack": ["ssh-ed25519 AAAA k jack@dev-machine # work: main"]})
+        ud = render_userdata({"jack": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI72ba82c46560c47f070c1ada767277bc694dea48fd1 k jack@dev-machine # work: main"]})
         doc = json.loads(ud.split("\n", 1)[1])
         self.assertEqual(doc["users"][0]["ssh_authorized_keys"],
-                         ["ssh-ed25519 AAAA k jack@dev-machine # work: main"])
+                         ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI72ba82c46560c47f070c1ada767277bc694dea48fd1 k jack@dev-machine # work: main"])
 
     def test_refuses_empty(self):
         with self.assertRaises(ValueError):

@@ -27,37 +27,31 @@ from ..inspect.singletons import env_paths
 class _Entry:
     path: str
     meaning: str
-    target: str | None = None   # symlink target (drawn as `path → target`)
+    target: str | None = None
     size: int | None = None
 
 
 class _Subject(NamedTuple):
-    kind: str                            # "env" (files every exe/db shares) | "exe" | "db"
+    kind: str
     name: str
-    candidates: list[tuple[str, str]]    # (guest path, what it is)
-    note: str | None                     # an exe's schedule ("always" for a server)
+    candidates: list[tuple[str, str]]
+    note: str | None
 
 
 class _Stat(NamedTuple):
-    """What the probe found at one path."""
-    kind: str                            # "file" | "dir" | "link" | "missing"
-    size: int | None = None              # bytes (a dir: all its files)
-    files: int = 0                       # a dir's file count
-    target: str | None = None            # a link: where it points
-    resolved: str | None = None          # a link: the file it ends at
+    kind: str
+    size: int | None = None
+    files: int = 0
+    target: str | None = None
+    resolved: str | None = None
 
 
 def _int(s: str) -> int | None:
     return int(s) if s.isdigit() else None
 
 
-# ---------------------------------------------------------------------------
-# what each subject should show (paths are anci-owned; no ad-hoc strings)
-
-
 def _subjects(conf: Conf, env_name: str, kind: str | None,
               name: str | None) -> list[_Subject]:
-    """What to show: one exe/db, or everything."""
     def exe_sub(n: str, shared: bool = True) -> _Subject:
         schedule = conf.exes[n].resolve_for(env_name).schedule or "always"
         return _Subject("exe", n, exe_paths(conf, env_name, n, shared=shared), schedule)
@@ -91,7 +85,6 @@ def _subjects(conf: Conf, env_name: str, kind: str | None,
             "expected `info exe <name>` or `info db <name>`",
             try_=f"anci {env_name} info exe {name}",
         )
-    # everything: the env-wide files once, then each exe's and db's own
     subs = [exe_sub(n, shared=False) for n in conf.exes]
     subs += [db_sub(n, shared=False) for n in conf.dbs]
     if not subs:
@@ -99,14 +92,6 @@ def _subjects(conf: Conf, env_name: str, kind: str | None,
     return [_Subject("env", env_name, env_paths(conf, env_name), None), *subs]
 
 
-# ---------------------------------------------------------------------------
-# guest probe: one round trip for every path
-
-
-# `describe P` prints one `kind<TAB>a<TAB>b` line; a link adds a second line
-# describing what it resolves to (the blob for an exe's `current`, the version
-# dir for its `static`). A dir is sized through its links (`find -L`): static
-# versions and ext dirs are trees of symlinks into the blob store
 _DESCRIBE = r"""
 describe() {
   p="$1"
@@ -142,7 +127,6 @@ def _stat(line: str) -> _Stat:
 
 
 def _probe(conn: ssh.Conn, paths: list[str]) -> dict[str, _Stat]:
-    """path -> what's there; a link's resolved file is keyed by its own path."""
     found = ssh.facts(conn, {p: f"describe {shlex.quote(p)}" for p in paths},
                       preamble=_DESCRIBE)
     res: dict[str, _Stat] = {}
@@ -150,12 +134,8 @@ def _probe(conn: ssh.Conn, paths: list[str]) -> dict[str, _Stat]:
         lines = found.get(path) or ["missing"]
         st = res.setdefault(path, _stat(lines[0]))
         if st.kind == "link" and len(lines) > 1:
-            res.setdefault(st.resolved, _stat(lines[1]))  # first wins (the blob's stat)
+            res.setdefault(st.resolved, _stat(lines[1]))
     return res
-
-
-# ---------------------------------------------------------------------------
-# rendering
 
 
 def _split_root(path: str) -> tuple[str, str]:
@@ -166,7 +146,6 @@ def _split_root(path: str) -> tuple[str, str]:
 
 
 def _target(root: str, target: str) -> str:
-    """A symlink target, shown relative when it's inside the row's root."""
     if target == root or target.startswith(root + "/"):
         return target[len(root) + 1:]
     return target
@@ -174,19 +153,13 @@ def _target(root: str, target: str) -> str:
 
 def _entries(candidates: list[tuple[str, str]], res: dict[str, _Stat], *,
              owner: str | None = None, blob_owners: dict[str, str] | None = None) -> list[_Entry]:
-    """`blob_owners` (blob -> the first subject shown with it) is shared across
-    subjects, so a blob two exes run says so instead of looking like two."""
     out: list[_Entry] = []
     emitted: set[str] = set()
     for path, meaning in candidates:
         st = res.get(path, _Stat("missing"))
-        # sqlite keeps a db's -wal/-shm only while it's in use: absent isn't news
-        # (an unreachable box probed nothing, so every path still shows)
         if res and st.kind == "missing" and path.endswith(("-wal", "-shm")):
             continue
         if st.kind == "link":
-            # a link into the blob store or a static version gets its own
-            # line, before the pointer
             dest = st.resolved or ""
             if dest not in emitted:
                 if dest.startswith(layout.BLOB_DIR + "/"):
@@ -216,16 +189,15 @@ def _render(
     blob_owners: dict[str, str] | None = None,
 ) -> None:
     entries = _entries(candidates, res, owner=name, blob_owners=blob_owners)
-    # a job's schedule rides on its header; a service (note "always") needs none
     sched = f"  {ui.dim(note)}" if note not in (None, "always") else ""
     print(f"\n  {ui.bold('shared') if kind == 'env' else f'{ui.dim(kind)} {ui.bold(name)}'}{sched}")
 
-    by_root: dict[str, list[tuple[str, _Entry]]] = {}   # insertion-ordered
+    by_root: dict[str, list[tuple[str, _Entry]]] = {}
     for e in entries:
         root, rel = _split_root(e.path)
         by_root.setdefault(root, []).append((rel, e))
 
-    lines: list[tuple[str, str, str, str]] = []  # root, left, size, meaning
+    lines: list[tuple[str, str, str, str]] = []
     for root, items in by_root.items():
         for i, (rel, e) in enumerate(items):
             branch = "└─" if i == len(items) - 1 else "├─"
@@ -262,7 +234,7 @@ def info(conf: Conf, env_name: str, kind: str | None = None, name: str | None = 
         conn = ssh.connect(conf, env_name, user)
         res = _probe(conn, paths)
     except ssh.SSHError:
-        reachable = False  # show the paths from the conf with `—` sizes
+        reachable = False
 
     blob_owners: dict[str, str] = {}
     for sub in subjects:

@@ -1,5 +1,4 @@
 #!/bin/sh
-# rendered by anci — do not edit (see the anci edge docs)
 set -u
 route=@ROUTE_FILE@
 

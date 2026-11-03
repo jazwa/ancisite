@@ -34,19 +34,12 @@ from ..render.cloudinit import render_network_config, render_userdata
 from ..conf import Conf, Env, disk_to_qemu, mem_to_kib, mem_to_mib
 
 IMAGES_DIR = "/var/lib/libvirt/images"
-CLOUDINIT_DIR = "/var/lib/libvirt/anci-cloudinit"   # a box's rendered cloud-init
+CLOUDINIT_DIR = "/var/lib/libvirt/anci-cloudinit"
 SSH_PORT = 22
-SHUTDOWN_TIMEOUT = 60   # seconds of ACPI shutdown before pulling the plug
-
-
-# ---------------------------------------------------------------------------
-# domain state
+SHUTDOWN_TIMEOUT = 60
 
 
 def _domstate(hv: Hypervisor, dom_name: str) -> str | None:
-    """The guest's state name ("running", "paused", "shut off"…), or None when
-    the domain isn't defined. Call only after _require_daemon(): a dead daemon
-    and an absent domain both fail this virsh call."""
     p = hv.virsh("domstate", dom_name, check=False)
     return p.stdout.strip() if p.returncode == 0 else None
 
@@ -56,14 +49,10 @@ def _domain_exists(hv: Hypervisor, dom_name: str) -> bool:
 
 
 def _domain_running(hv: Hypervisor, dom_name: str) -> bool:
-    """True only for state "running" — an exact match on purpose. "paused"
-    still exists (and holds its memory) but the box answers nothing."""
     return _domstate(hv, dom_name) == "running"
 
 
 def _require_daemon(hv: Hypervisor) -> None:
-    """Fail cleanly when libvirt (or the remote host) isn't answering, so a
-    dead daemon doesn't read as "no box" to the lookups above."""
     p = hv.virsh("uri", check=False)
     if p.returncode == 0:
         return
@@ -83,29 +72,17 @@ def _require_daemon(hv: Hypervisor) -> None:
 
 
 def _stop_domain(hv: Hypervisor, dom_name: str) -> bool:
-    """Stop a running box: ACPI power button first, hard power-off as fallback.
-
-    `virsh shutdown` lets the guest's systemd run a real shutdown instead of
-    `destroy`'s instant power-cut mid-write. Returns True when the power-off
-    was hard (so the caller can warn about writes that may be lost).
-    """
     hv.virsh("shutdown", dom_name)
     deadline = time.monotonic() + SHUTDOWN_TIMEOUT
     while time.monotonic() < deadline:
         if not _domain_running(hv, dom_name):
             return False
         time.sleep(1)
-    hv.virsh("destroy", dom_name)  # hung guest: the pull-the-plug behavior
+    hv.virsh("destroy", dom_name)
     return True
 
 
 def _confirm_recreate(env_name: str, *, force: bool = False) -> bool:
-    """The y/N gate for `--recreate` — the one command that deletes the disk.
-
-    `--force` is the explicit yes for scripts (same flag `regen` uses).
-    Without a terminal and without --force this refuses: an irreversible disk
-    decision can't be made from an unattended stdin.
-    """
     return ui.confirm(
         "--recreate is a HARD RESET:",
         ["IT DELETES THE BOX'S DISK — ALL DEPLOYED EXES, ALL DATABASES,",
@@ -120,13 +97,7 @@ def _confirm_recreate(env_name: str, *, force: bool = False) -> bool:
     )
 
 
-# ---------------------------------------------------------------------------
-# provisioning steps (all run on the hypervisor)
-
-
 def _ensure_image(hv: Hypervisor, url: str, dest: str, sha512: str | None) -> str:
-    """The base image, downloaded once and sha512-verified. Returns the ui
-    step detail: "cached" or "downloaded"."""
     q = shlex.quote
     verify = (f'echo {q(sha512)}"  $d.tmp" | sha512sum -c --status - '
               f'|| {{ rm -f "$d.tmp"; echo "sha512 mismatch for $d" >&2; exit 3; }}\n'
@@ -146,15 +117,12 @@ def _ensure_image(hv: Hypervisor, url: str, dest: str, sha512: str | None) -> st
 
 
 def _put(hv: Hypervisor, path: str, text: str) -> None:
-    """Write a root-owned file (mode 600) on the hypervisor."""
     q = shlex.quote
     hv.root(f"mkdir -p {q(posixpath.dirname(path))}; umask 077; cat > {q(path)}",
             f"writing {path}", input=text)
 
 
 def _ensure_disk(hv: Hypervisor, dom_name: str, base_image: str, size: str) -> str:
-    """Copy the base image to this box's disk and resize it once. Never touches
-    an existing disk."""
     q = shlex.quote
     disk = f"{IMAGES_DIR}/{dom_name}.qcow2"
     hv.root(f'set -e; d={q(disk)}; [ -f "$d" ] && exit 0; '
@@ -168,11 +136,10 @@ def _virt_install(hv: Hypervisor, env: Env, dom_name: str, disk: str,
     argv = [
         "virt-install", "--connect", "qemu:///system",
         "--name", dom_name,
-        "--memory", str(mem_to_mib(env.mem)),  # virt-install --memory is MiB (not KiB!)
+        "--memory", str(mem_to_mib(env.mem)),
         "--vcpus", str(env.vcpus),
         "--disk", f"path={disk},format=qcow2,bus=virtio",
         "--os-variant", "debian13",
-        # Deterministic MAC: anchors the guest's netplan interface match (see net.py).
         "--network", f"network=default,model=virtio,mac={mac}",
         "--graphics", "vnc", "--noautoconsole", "--import",
         "--cloud-init", f"user-data={user_data},network-config={network_config}",
@@ -196,9 +163,6 @@ def _virt_install(hv: Hypervisor, env: Env, dom_name: str, disk: str,
 
 
 def _wait_for_ssh_port(hv: Hypervisor, ip: str, dom_name: str, timeout_s: int = 420) -> None:
-    """Poll TCP:22 from the hypervisor until the guest answers (no auth check —
-    that needs user keys). The box is on the hypervisor's NAT, so the probe runs
-    there — the dev machine can't always reach it."""
     probe = f"timeout 3 bash -c 'cat < /dev/null > /dev/tcp/{ip}/{SSH_PORT}'"
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -212,20 +176,11 @@ def _wait_for_ssh_port(hv: Hypervisor, ip: str, dom_name: str, timeout_s: int = 
     )
 
 
-# ---------------------------------------------------------------------------
-# VM resize reconciliation: bring vcpus / mem / disk to the conf
-#
-# `up` and `migrate` (via `vm_reconcile`) call this. Live where the
-# hypervisor allows it; config-only (next restart) when a maximum has to be
-# raised; disk grows only. The guest-side filesystem grow rides converge (see
-# `converge/disk.py`).
-
 _QEMU_UNITS = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3, "t": 1024 ** 4}
 _MEM_UNITS = {"kib": 1, "mib": 1024, "gib": 1024 ** 2, "tib": 1024 ** 3}
 
 
 def _qemu_size_bytes(size: str) -> int:
-    """'20G'/'512M' (qemu-img form) -> bytes."""
     s = size.strip().lower()
     return int(s[:-1]) * _QEMU_UNITS[s[-1]]
 
@@ -237,7 +192,6 @@ def _kib(el) -> int:
 
 @dataclass
 class DomainFacts:
-    """The domain's live/persistent size facts, as read from libvirt."""
 
     running: bool
     vcpus: int
@@ -249,11 +203,6 @@ class DomainFacts:
 
 
 def _disk_capacity(hv: Hypervisor, dom_name: str, path: str, running: bool) -> int:
-    """Block-device capacity in bytes.
-
-    While running, read it via `virsh domblkinfo` — qemu holds the image lock,
-    so `qemu-img info` on the file would fail. Stopped, the file is unlocked.
-    """
     if running:
         out = hv.virsh("domblkinfo", dom_name, path).stdout
         for line in out.splitlines():
@@ -270,8 +219,6 @@ def _disk_capacity(hv: Hypervisor, dom_name: str, path: str, running: bool) -> i
 
 
 def _domain_facts(hv: Hypervisor, dom_name: str, *, disk_optional: bool = False) -> DomainFacts:
-    """`disk_optional`: when the disk's size can't be read (a stopped VM's image
-    is root's file, and `hv` may not run as root), leave it unknown."""
     root = ET.fromstring(hv.virsh("dumpxml", dom_name).stdout)
     running = _domain_running(hv, dom_name)
     vcpu = root.find("vcpu")
@@ -300,8 +247,6 @@ def _domain_facts(hv: Hypervisor, dom_name: str, *, disk_optional: bool = False)
 
 @dataclass
 class ResizePlan:
-    """What to change. `*_max` fields are config-only; `*_config` forces the
-    current value to config-only too (a max was raised, so it can't go live)."""
 
     vcpus: int | None = None
     vcpus_max: int | None = None
@@ -329,7 +274,6 @@ class ResizePlan:
 
 
 def _resize_plan(env: Env, facts: DomainFacts) -> ResizePlan:
-    """Diff the conf against the domain. Raises on a disk shrink."""
     plan = ResizePlan()
     if env.vcpus != facts.vcpus:
         plan.vcpus = env.vcpus
@@ -360,7 +304,6 @@ def _resize_plan(env: Env, facts: DomainFacts) -> ResizePlan:
 
 def _set_live_or_config(hv: Hypervisor, cmd: str, dom_name: str, value: int,
                         live: bool, what: str, notes: list[str]) -> None:
-    """`virsh setvcpus|setmem`; if the live change isn't supported, config-only."""
     try:
         hv.virsh(cmd, dom_name, str(value),
                  *(["--live", "--config"] if live else ["--config"]))
@@ -384,7 +327,6 @@ def _apply_resize(hv: Hypervisor, dom_name: str, plan: ResizePlan, facts: Domain
                             facts.running and not plan.mem_config, "memory", plan.notes)
     if plan.disk_bytes is not None:
         if facts.running:
-            # a bare number is KiB to blockresize: the "B" makes it bytes
             hv.virsh("blockresize", dom_name, facts.disk_path, f"{plan.disk_bytes}B")
         else:
             hv.root(f"qemu-img resize {shlex.quote(facts.disk_path)} {plan.disk_bytes}",
@@ -401,10 +343,6 @@ def _facts_summary(facts: DomainFacts) -> str:
 
 
 def vm_differences(conf: Conf, env_name: str) -> dict[str, tuple[str, str]]:
-    """How the env's VM differs in size from the conf, for `plan`: field ->
-    (the VM's value, the conf's). Read-only. On this dev machine it reads as
-    you, without sudo, which works when you're in the `libvirt` group; when
-    libvirt refuses, or there's no VM (an adopted box), it's {}."""
     env = conf.envs.get(env_name)
     if env is None or is_remote(env):
         return {}
@@ -426,7 +364,6 @@ def vm_differences(conf: Conf, env_name: str) -> dict[str, tuple[str, str]]:
 
 
 def _reconcile_domain(hv: Hypervisor, env: Env, dom_name: str) -> tuple[bool, str]:
-    """Read → plan → apply the VM size diff. Returns (changed, summary)."""
     facts = _domain_facts(hv, dom_name)
     plan = _resize_plan(env, facts)
     if not plan.changed:
@@ -437,7 +374,6 @@ def _reconcile_domain(hv: Hypervisor, env: Env, dom_name: str) -> tuple[bool, st
 
 
 def _require_running(env_name: str, state: str) -> None:
-    """Refuse `migrate` when the box isn't running."""
     if state == "running":
         return
     if state == "absent":
@@ -454,11 +390,6 @@ def _require_running(env_name: str, state: str) -> None:
 
 
 def require_running(conf: Conf, env_name: str) -> None:
-    """Refuse a managed box that isn't running, fast — so `migrate` fails at once
-    instead of waiting out ssh's retries. One read-only `virsh domstate`: no
-    resize, and locally no sudo (a `libvirt` group member may read domain
-    state). When the state can't be read (no permission, daemon down) this says
-    nothing and ssh reports the problem. Adopted boxes: no-op."""
     env = conf.envs.get(env_name)
     if env is None or is_remote(env):
         return
@@ -478,9 +409,6 @@ def require_running(conf: Conf, env_name: str) -> None:
 
 
 def vm_reconcile(conf: Conf, env_name: str) -> None:
-    """Resize a managed box to the conf, and refuse one that isn't running.
-    Adopted boxes: no-op (no hypervisor). Only virsh runs here (a running VM
-    is resized live), so a `libvirt` group member needs no sudo."""
     env = conf.envs.get(env_name)
     if env is None or is_remote(env):
         return
@@ -496,19 +424,11 @@ def vm_reconcile(conf: Conf, env_name: str) -> None:
         print(f"  {ui.green('✓')} resized {dom_name}: {summary}")
 
 
-# ---------------------------------------------------------------------------
-# hypervisor-side registry: which box owns which address (collision detection)
-#
-# Each box's identity is stamped into its libvirt domain <description>, so `up`
-# can refuse to create a box on an address another project already claimed —
-# the one collision a per-name hash can't rule out.
-
 _DESC_RE = re.compile(r"<description>(.*?)</description>", re.S)
 _DESC_FIELD_RE = re.compile(r"(\w+)=(\S+)")
 
 
 def _registry(hv: Hypervisor) -> dict[str, str]:
-    """`ip -> "box_id/env"` for every anci domain that carries a description."""
     out: dict[str, str] = {}
     listing = hv.virsh("list", "--all", "--name", check=False)
     if listing.returncode != 0:
@@ -526,12 +446,10 @@ def _registry(hv: Hypervisor) -> dict[str, str]:
 
 
 def _stamp(hv: Hypervisor, dom_name: str, box_id: str, env_name: str, ip: str) -> None:
-    """Record the box's identity in its domain description (best-effort)."""
     hv.virsh("desc", dom_name, f"anci box_id={box_id} env={env_name} ip={ip}", check=False)
 
 
 def _claim_or_fail(hv: Hypervisor, conf: Conf, env_name: str, ip: str) -> None:
-    """Hard-error if another box already claims `ip`."""
     owner = _registry(hv).get(ip)
     if owner and owner != f"{paths.box_id(conf)}/{env_name}":
         raise errors.EnvError(
@@ -539,10 +457,6 @@ def _claim_or_fail(hv: Hypervisor, conf: Conf, env_name: str, ip: str) -> None:
             why="two boxes can't share a static address (one env = one box)",
             try_="rename this env, or remove the other box",
         )
-
-
-# ---------------------------------------------------------------------------
-# the verbs
 
 
 def _managed_env(conf: Conf, env_name: str) -> Env:
@@ -560,9 +474,6 @@ def _managed_env(conf: Conf, env_name: str) -> Env:
 
 def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
            force: bool = False, pipe: ui.Pipeline | None = None) -> str | None:
-    """Provision/boot the box for an env from conf. Returns its address, or
-    None when the user aborted a --recreate (nothing was touched). `pipe`: the
-    caller's pipeline to report in (`up` goes on to converge in it, and ends it)."""
     env = _managed_env(conf, env_name)
     hv = hypervisor(conf, env_name)
     _require_daemon(hv)
@@ -570,8 +481,6 @@ def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
 
     bid = paths.box_id(conf)
     dom_name = net.domain_name(bid, env.name)
-    # Deterministic addressing: the IP is assigned, never discovered — an
-    # address on the hypervisor's default NAT.
     ip = net.env_ip(bid, env.name)
     mac = net.stable_mac(bid, env.name)
     _claim_or_fail(hv, conf, env_name, ip)
@@ -590,27 +499,21 @@ def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
         detail = _ensure_image(hv, entry.debian_image_url, base_image, entry.sha512)
     step.done(detail)
 
-    # Render cloud-init from conf BEFORE creating the domain; it's written to
-    # the hypervisor (CLOUDINIT_DIR), where virt-install reads it.
     user_data = render_userdata(conf.users_for_env(env_name))
     network_config = render_network_config(f"{ip}/24", mac, net.DEFAULT_GATEWAY)
 
     exists = _domain_exists(hv, dom_name)
-    # ask BEFORE the step starts: a step rewrites its own line on completion by
-    # moving the cursor up one, so anything printed while it runs gets erased
     if exists and recreate and not _confirm_recreate(env_name, force=force):
         print(f"  {ui.dim('aborted — nothing changed')}")
         return None
     step = pipe.step("creating box")
-    after_step: list[str] = []   # printed once the step line is final (see above)
+    after_step: list[str] = []
     if exists and recreate:
         if _domain_running(hv, dom_name):
             hv.virsh("destroy", dom_name)
         hv.virsh("undefine", dom_name)
         hv.root(f"rm -f {shlex.quote(f'{IMAGES_DIR}/{dom_name}.qcow2')}", "deleting the box's disk")
         exists = False
-        # the rebuilt box gets a new host key: anci rebuilt it, so the old pin is
-        # stale by construction (a dev-machine VM is never pinned)
         pin = pin_path(conf, env_name)
         if is_remote_host(env) and pin.is_file():
             pin.unlink()
@@ -634,7 +537,6 @@ def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
         print(line)
     _stamp(hv, dom_name, bid, env_name, ip)
 
-    # reconcile the VM size to the conf (live where possible)
     step = pipe.step("resizing box")
     changed, summary = _reconcile_domain(hv, env, dom_name)
     if changed:
@@ -642,8 +544,6 @@ def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
     else:
         step.skip(f"matches ({summary})")
 
-    # Readiness: TCP:22 on the assigned address. cloud-init keeps running in the
-    # background; the converge that follows waits for it (ssh.wait_ready).
     step = pipe.step("booting")
     with ui.Spinner("waiting for the box to answer ssh"):
         _wait_for_ssh_port(hv, ip, dom_name)
@@ -654,7 +554,6 @@ def env_up(conf: Conf, env_name: str, *, recreate: bool = False,
 
 
 def env_down(conf: Conf, env_name: str) -> None:
-    """Stop the env's box, keep the disk (idempotent)."""
     env = _managed_env(conf, env_name)
     hv = hypervisor(conf, env_name)
     _require_daemon(hv)

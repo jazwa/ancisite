@@ -21,7 +21,6 @@ from . import RESOURCES, TargetState, describe, diff, observed_state, target_sta
 from .core import ApplyContext, Change, Step, Uploads, sha
 from .walk import failed_step, script, step_output, walk
 
-# a fresh box's cloud-init may still be finishing its first boot
 _CLOUD_INIT = ("[ -e /var/lib/cloud/instance/boot-finished ] && echo 'status: done' "
                "|| cloud-init status 2>/dev/null || echo 'status: unavailable'")
 
@@ -30,30 +29,17 @@ def converge(conf: Conf, env_name: str, *, inputs: dict | None = None,
              grow_disk: bool = False,
              select: Callable[[list[Change]], list[Change]] | None = None,
              pipe: ui.Pipeline | None = None, label: str | None = None) -> str:
-    """Bring `env_name`'s box in line with the conf. Returns its address.
-
-    `inputs` hands resources what this run brings besides the conf, by resource
-    name (a deploy's binaries: `exe.deploy_inputs`). `grow_disk`: also grow the
-    guest filesystem into its disk (`up`/`reconcile`, which may have resized
-    it). `select` narrows the changes applied (`db.migration_setup`).
-
-    `pipe`: a verb's own pipeline to report in (it printed the header and ends
-    the pipeline); `label`: report the whole run as that one step.
-    """
     env = conf.envs.get(env_name)
     if env is None:
         raise errors.ConfError(f"env '{env_name}' isn't in anci.toml")
     user = auth.authorize(conf, env_name)
     conn = ssh.connect(conf, env_name, user)
-    # before any progress output: an env's first forward asks for sudo
     forward.reconcile(conf, env_name)
 
     own = pipe is None
     if own:
         print(f"\n  {ui.bold(env_name)} {ui.dim('→')} {conn.ip}\n")
         pipe = ui.Pipeline()
-    # the lock is the first thing touching the box; a fresh box's sshd answers
-    # before the account exists, so wait that out
     with boxlock.hold(conn, user, "deploy" if inputs else "converge", wait_ready=True):
         _converge(conf, env_name, user, conn, pipe, label, inputs=inputs or {},
                   grow_disk=grow_disk, select=select)
@@ -63,7 +49,6 @@ def converge(conf: Conf, env_name: str, *, inputs: dict | None = None,
 
 
 class _Quiet:
-    """A pipeline step that shows nothing: a labeled run reports once, at the end."""
 
     def done(self, *a): pass
     def skip(self, *a): pass
@@ -72,9 +57,6 @@ class _Quiet:
 
 
 def look(conf: Conf, env_name: str, conn, inputs: dict):
-    """What the conf wants on the box, before and after this run's `inputs` (a
-    deploy's builds), and what the box has: (conf_only, target, observed). The
-    one place converge and `plan` work these out."""
     conf_only = target_state(conf, env_name)
     target = TargetState(copy.deepcopy(dict(conf_only)))
     for r in RESOURCES:
@@ -85,13 +67,13 @@ def look(conf: Conf, env_name: str, conn, inputs: dict):
                       f'[ -f "$b" ] && echo "$b $(stat -c %s "$b")"; done' if blob_ids else ":"}
     observed = observed_state(conn, extra)
     if any("running" in line for line in observed.extra["ci"]):
-        ssh.wait_ready(conn)   # a fresh box: let cloud-init finish first
+        ssh.wait_ready(conn)
         observed = observed_state(conn, extra)
     return conf_only, target, observed
 
 
 def _converge(conf, env_name, user, conn, pipe, label, *, inputs, grow_disk, select):
-    whole = pipe.step(label) if label else None   # the run as one step
+    whole = pipe.step(label) if label else None
     step = _Quiet() if whole else pipe.step("inspecting")
     _, target, observed = look(conf, env_name, conn, inputs)
     changes = diff(observed, target)
@@ -108,7 +90,6 @@ def _converge(conf, env_name, user, conn, pipe, label, *, inputs, grow_disk, sel
         for c in applied:
             print(f"    {ui.dim(describe(c))}")
 
-    # work on another machine the script depends on (the hypervisor's edge)
     for where, work in ctx.elsewhere:
         other = pipe.step(where)
         detail = work()
@@ -145,8 +126,6 @@ def _converge(conf, env_name, user, conn, pipe, label, *, inputs, grow_disk, sel
 
 
 def run_steps(conn, steps: list[Step]) -> None:
-    """Run steps, in the order given, as one root script — for a verb that
-    acts on the box outside a converge (regen). Ships nothing."""
     if not steps:
         return
     try:
@@ -162,12 +141,9 @@ def run_steps(conn, steps: list[Step]) -> None:
 
 
 def _upload(conn, uploads: Uploads, run: str) -> str:
-    """One tar — the script, the files (`f/<n>`), the blobs with their modes
-    (`b/<id>`, `m/<id>`), and a sha256 manifest — to the box. Its path there."""
     local = scratch.local("apply.tar")
     local.unlink(missing_ok=True)
     manifest = []
-    # 0600 from the start: it may carry the decrypted secrets file
     with os.fdopen(os.open(local, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f, \
          tarfile.open(fileobj=f, mode="w") as tar:
         def add(name: str, data: bytes) -> None:
@@ -199,7 +175,6 @@ def _upload(conn, uploads: Uploads, run: str) -> str:
 
 
 def _launcher(remote: str) -> str:
-    """Root: unpack the upload, check every byte arrived, run its script."""
     t = shlex.quote(remote)
     return (f"set -e\nU=$(mktemp -d)\ntrap 'rm -rf \"$U\" {t}' EXIT\n"
             f'tar -xf {t} -C "$U"\n'

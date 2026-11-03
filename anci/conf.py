@@ -19,21 +19,10 @@ from .errors import ConfError
 
 TOP_KEYS = {"anci-version", "user", "env", "exe", "db", "replication"}
 
-# env names the CLI can't use: `anci <word> ...` — these words are top-level
-# commands instead of env scope (see cli.py).
-RESERVED_ENV_NAMES = {"init", "completion"}
-
-# exe names that would collide with anci's own units (`<exe>.service`).
-RESERVED_EXE_NAMES = {"caddy", "litestream", "anci-logtrim"}
-
 USER_KEYS = {"ssh-pub-keys"}
 ENV_KEYS = {"ip", "vm", "access-users", "port", "mode"}
-# how anci treats an env's box: `full` = anci creates and runs the VM;
-# `adopt` = someone else's box, set up over ssh
 ENV_MODES = ("full", "adopt")
 VM_KEYS = {"anci-version", "vcpus", "mem", "disk"}
-# `host` belongs to one env (never a local one): top-level only when the conf has
-# a single, non-local env; otherwise set per env
 EXE_KEYS = {"source", "args", "env-vars", "schedule", "static", "host", "env"}
 EXE_OVERRIDE_KEYS = {"source", "args", "env-vars", "schedule", "static", "host"}
 DB_KEYS = {"migrations", "extensions", "replication", "env"}
@@ -41,13 +30,7 @@ DB_ENV_KEYS = {"replication"}
 REPLICATION_KEYS = {"bucket", "path", "endpoint", "region", "access-key-env",
                     "secret-key-env", "sync-interval", "retention"}
 
-# Go duration strings, litestream's own format ("1s", "5m", "24h", "720h").
 _DURATION_RE = re.compile(r"^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$")
-# valid environment variable names (rendered into the yaml as ${NAME})
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_NAME_RE = layout.NAME_RE   # shared with the box-inventory filter (layout.is_safe_name)
-# user names become Linux accounts (useradd's portable rule)
-_USER_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 @dataclass
@@ -58,9 +41,6 @@ class User:
 
 @dataclass
 class Env:
-    """A deployment target and its box. `vm` in the conf is this env's machine
-    config, inlined (`vm = { anci-version = ..., vcpus = ... }`); there is no
-    separate machine entity — one env is one box."""
 
     name: str
     ip: str
@@ -70,24 +50,19 @@ class Env:
     vcpus: int = 4
     mem: str = "4gb"
     disk: str = "20gb"
-    # `full` (default): anci manages the VM — provisions/resizes/stops it.
-    # `adopt`: someone else's box; anci bootstraps it over ssh, no hypervisor.
     mode: str = "full"
 
     @property
     def adopted(self) -> bool:
-        """True for a box anci adopted (`mode = 'adopt'`) rather than created."""
         return self.mode == "adopt"
 
     @property
     def local(self) -> bool:
-        """True for a VM on this dev machine (`ip = '127.0.0.1'`)."""
         return self.ip == "127.0.0.1"
 
 
 @dataclass
 class ExeOverride:
-    """Per-env override block: [exe.<name>.env.<env>]."""
 
     env: str
     source: str | None = None
@@ -104,17 +79,12 @@ class Exe:
     source: str
     args: list[str] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
-    schedule: str | None = None   # OnCalendar expression → scheduled job
-    static: str | None = None     # directory shipped with each deploy (ANCI_STATIC_DIR)
-    host: str | None = None       # public domain (single non-local env only; else per env)
+    schedule: str | None = None
+    static: str | None = None
+    host: str | None = None
     env_overrides: dict[str, ExeOverride] = field(default_factory=dict)
 
     def resolve_for(self, env_name: str) -> ResolvedExe:
-        """Merge the base exe with its per-env override for `env_name`.
-
-        Merge rules: map keys (env-vars) deep-merge, scalars replace.
-        An env with no override just gets the base config.
-        """
         ov = self.env_overrides.get(env_name)
         return ResolvedExe(
             name=self.name,
@@ -131,7 +101,6 @@ class Exe:
 
 @dataclass
 class ResolvedExe:
-    """An exe fully resolved for one env (no remaining overrides)."""
 
     name: str
     env: str
@@ -146,43 +115,27 @@ class ResolvedExe:
 
 @dataclass
 class Replication:
-    """A db's s3-compatible replica (litestream). s3-compatible only — AWS S3,
-    or anything else via its `endpoint` (R2, MinIO, …; litestream forces
-    path-style addressing when an endpoint is set). `region` pins the signing
-    region (AWS auto-discovers it when unset; S3-compatible stores may want an
-    explicit value). `path` defaults to the db name (the key prefix inside the
-    bucket); `*_env` name the env vars in the secrets file that carry the
-    credentials (default: the AWS chain)."""
 
     bucket: str
-    path: str | None = None              # key prefix; resolve_for defaults it to <env>/<db>
-    endpoint: str | None = None          # non-AWS S3-compatible stores
-    region: str | None = None            # signing/region; AWS auto-discovers when unset
-    access_key_env: str | None = None    # env var NAME in the secrets file
+    path: str | None = None
+    endpoint: str | None = None
+    region: str | None = None
+    access_key_env: str | None = None
     secret_key_env: str | None = None
-    sync_interval: str | None = None     # Go duration, e.g. '1s'
-    retention: str | None = None         # Go duration, e.g. '720h'
+    sync_interval: str | None = None
+    retention: str | None = None
 
 
 @dataclass
 class Db:
-    """A sqlite database, materialized per (vm, env) on demand.
-
-    Dbs are never deployed — `migrate` creates/updates them.
-    Every exe on an env receives ANCI_DB_<NAME>_PATH for every db.
-    """
 
     name: str
-    migrations: str                      # directory; order = filename sort
+    migrations: str
     extensions: list[str] = field(default_factory=list)
-    replication: Replication | None = None   # the base; read it through resolve_for
-    # [db.<name>.env.<env>]: that env's replication (None = off there)
+    replication: Replication | None = None
     env_replication: dict[str, Replication | None] = field(default_factory=dict)
 
     def resolve_for(self, env_name: str) -> "Db":
-        """The db as `env_name` sees it: its per-env replication, else the base —
-        with the replica under `<env>/<db>` unless `path` is set, so two envs that
-        replicate the same db never share a replica."""
         rep = self.env_replication.get(env_name, self.replication)
         if rep is not None and rep.path is None:
             rep = dataclasses.replace(rep, path=f"{env_name}/{self.name}")
@@ -195,25 +148,18 @@ class Conf:
     envs: dict[str, Env]
     exes: dict[str, Exe]
     dbs: dict[str, Db] = field(default_factory=dict)
-    path: str | None = None  # where this conf was loaded from (project-root anchor)
+    path: str | None = None
 
     def replicated_dbs(self, env_name: str) -> list[Db]:
-        """The dbs `env_name` replicates, resolved for it (conf order)."""
         return [d for d in (db.resolve_for(env_name) for db in self.dbs.values())
                 if d.replication]
 
     def users_for_env(self, env_name: str) -> dict[str, list[str]]:
-        """conf user name -> their ssh keys, for users with access to this env
-        (one guest account + `authorized_keys` per user, per box)."""
         env = self.envs[env_name]
         return {
             name: sorted(self.users[name].ssh_pub_keys)
             for name in sorted(set(env.access_users))
         }
-
-
-# ---------------------------------------------------------------------------
-# parsing helpers
 
 
 def _only_keys(d: dict, allowed: set[str], ctx: str) -> None:
@@ -273,13 +219,7 @@ def _int(d: dict, key: str, ctx: str) -> int:
     return v
 
 
-# ---------------------------------------------------------------------------
-# size parsing
-
-
 def _size_mib(value: str | int, what: str, int_unit: str) -> int:
-    """'512mb' / '4gb' / a bare integer (in `int_unit`: 'MiB' or 'GiB') -> MiB.
-    The one size parser, so every caller agrees on what a number means."""
     per_int = {"MiB": 1, "GiB": 1024}[int_unit]
     if isinstance(value, int):
         if value <= 0:
@@ -296,44 +236,27 @@ def _size_mib(value: str | int, what: str, int_unit: str) -> int:
 
 
 def mem_to_mib(mem: str | int) -> int:
-    """'512mb'/'4gb'/int(MiB) -> MiB.
-
-    Used for `virt-install --memory`, whose default unit is **MiB** (not KiB —
-    passing KiB here silently requests 1024x the RAM; regression-tested).
-    """
     return _size_mib(mem, "mem", "MiB")
 
 
 def mem_to_kib(mem: str | int) -> int:
-    """'512mb'/'4gb'/int(MiB) -> KiB, for libvirt's setmem/setmaxmem. A bare
-    integer is MiB here too — the same conf value must mean the same size."""
     return mem_to_mib(mem) * 1024
 
 
+def disk_to_mib(disk: str | int) -> int:
+    return _size_mib(disk, "disk", "GiB")
+
+
 def disk_to_qemu(disk: str | int) -> str:
-    """'20gb'/'512mb'/int(GiB) -> qemu-img size string like '20G'."""
-    mib = _size_mib(disk, "disk", "GiB")
+    mib = disk_to_mib(disk)
     return f"{mib // 1024}G" if mib % 1024 == 0 else f"{mib}M"
 
 
-# ---------------------------------------------------------------------------
-# port allocation
-
-
 def port_var(exe_name: str) -> str:
-    """`api` → `ANCI_PORT_API`: an exe's port, as every exe on the env sees it."""
     return "ANCI_PORT_" + re.sub(r"[^A-Za-z0-9]", "_", exe_name).upper()
 
 
 def allocate_ports(conf: Conf, base: int = 8000, exe_stride: int = 10) -> dict[tuple[str, str], int]:
-    """Deterministically assign one localhost port per (exe, env).
-
-    Scheduled jobs (`exe.schedule`) serve no HTTP, so they get no port and
-    consume no slot — adding one never shifts a serving exe's port.
-    Each env is its own box, so ports need only be unique within an env; exes
-    per env are ordered by name. port = base + exe_index*exe_stride.
-    Deterministic so the same conf always renders the same units.
-    """
     ports: dict[tuple[str, str], int] = {}
     for env in sorted(conf.envs.values(), key=lambda e: e.name):
         exe_names = sorted(
@@ -347,10 +270,6 @@ def allocate_ports(conf: Conf, base: int = 8000, exe_stride: int = 10) -> dict[t
         for xi, exe_name in enumerate(exe_names):
             ports[(exe_name, env.name)] = base + exe_stride * xi
     return ports
-
-
-# ---------------------------------------------------------------------------
-# loaders
 
 
 def _parse_user(name: str, raw: dict) -> User:
@@ -387,7 +306,6 @@ def _parse_env(name: str, raw: dict, default_version: str | None) -> Env:
         raise ConfError(f"{ctx}: 'vm' must be a table of machine config")
     _only_keys(vm_raw, VM_KEYS, vm_ctx)
 
-    # anci-version: per-env vm wins, else the top-level default
     anci_version = vm_raw.get("anci-version", default_version)
     if not isinstance(anci_version, str) or not anci_version:
         raise ConfError(
@@ -408,7 +326,7 @@ def _parse_env(name: str, raw: dict, default_version: str | None) -> Env:
                   access_users=_str_list(raw, "access-users", ctx),
                   anci_version=anci_version, port=port, mode=mode)
     if adopted:
-        return Env(**common)   # someone else sized the box: Env's defaults stand
+        return Env(**common)
 
     missing = [k for k in ("vcpus", "mem", "disk") if k not in vm_raw]
     if missing:
@@ -417,8 +335,6 @@ def _parse_env(name: str, raw: dict, default_version: str | None) -> Env:
             f"(vcpus/mem/disk size the box)"
         )
     vcpus = _int(vm_raw, "vcpus", vm_ctx)
-    if vcpus <= 0:
-        raise ConfError(f"{vm_ctx}: 'vcpus' must be positive")
     mem, disk = vm_raw["mem"], vm_raw["disk"]
     if isinstance(mem, bool) or not isinstance(mem, (str, int)):
         raise ConfError(f"{vm_ctx}: 'mem' must be a string like '4gb' or an integer MiB")
@@ -474,8 +390,6 @@ def _parse_exe(name: str, raw: dict, envs: dict[str, Env]) -> Exe:
                 f"[exe.{name}.env.{env_name}] must be a table "
                 f"(app env vars go in 'env-vars', e.g. env-vars = {{ KEY = 'value' }})"
             )
-        # validate against the conf's envs *before* normalizing below, or a
-        # typo'd env would be silently accepted as an empty override
         if env_name not in envs:
             raise ConfError(f"[exe.{name}.env.{env_name}]: env '{env_name}' is not defined")
         overrides[env_name] = _parse_exe_override(name, env_name, ov_raw)
@@ -493,9 +407,6 @@ def _parse_exe(name: str, raw: dict, envs: dict[str, Env]) -> Exe:
 
 
 def _parse_replication(raw: dict, defaults: dict, ctx: str) -> Replication:
-    """A merged replication spec: `[replication]` defaults overlaid by the
-    per-db `[db.<name>.replication]` table (per-db keys win). Validation runs
-    on the merged result, so a partial shared table is legal."""
     _only_keys(raw, REPLICATION_KEYS, ctx)
     merged = {**defaults, **raw}
     bucket = merged.get("bucket")
@@ -527,7 +438,7 @@ def _parse_replication(raw: dict, defaults: dict, ctx: str) -> Replication:
         raise ConfError(f"{ctx}: 'path' must be a relative key prefix like 'prod/main' "
                         f"(no leading or trailing '/', no '.' or '..' segments)")
     for name in (access_key_env, secret_key_env):
-        if name is not None and not _ENV_NAME_RE.match(name):
+        if name is not None and not validate.ENV_VAR_RE.match(name):
             raise ConfError(
                 f"{ctx}: '{name}' isn't a valid env var name "
                 f"(letters, digits, underscores; can't start with a digit)"
@@ -586,7 +497,6 @@ def _parse_db(name: str, raw: dict, replication_defaults: dict, envs: dict[str, 
         if rep is False:
             env_replication[env_name] = None
         elif isinstance(rep, dict):
-            # overlays the base table (and [replication]); per-env keys win
             env_replication[env_name] = _parse_replication(
                 {**(replication or {}), **rep}, replication_defaults,
                 f"[db.{name}.env.{env_name}.replication]")
@@ -602,19 +512,11 @@ def _parse_db(name: str, raw: dict, replication_defaults: dict, envs: dict[str, 
 
 
 def conf_path(conf, rel: str) -> Path:
-    """Resolve a conf-relative path (source, static, migrations, extensions) anchored on
-    the conf's directory — not the CWD (the project boundary, not the chair)."""
     p = Path(rel)
     return p if p.is_absolute() else (paths.project_root(conf) / p).resolve()
 
 
 def find_conf(start: str | Path | None = None) -> str:
-    """Git-style: walk up from the CWD (or `start`) until anci.toml is found.
-
-    All project state (pins, secrets courier, migrations) is anchored on the
-    conf's directory (the project boundary), so finding the conf means finding the
-    project root — running anci from a subdirectory of your project just works.
-    """
     d = Path(start or Path.cwd()).resolve()
     for d in [d, *d.parents]:
         candidate = d / "anci.toml"
@@ -627,10 +529,6 @@ def find_conf(start: str | Path | None = None) -> str:
 
 
 def load(path: str | Path | None = None) -> Conf:
-    """Load and fully validate an anci.toml. Raises ConfError on any problem.
-
-    `path=None` triggers the git-style upward search (see find_conf).
-    """
     if path is None:
         path = find_conf()
     path = Path(path)
@@ -641,6 +539,7 @@ def load(path: str | Path | None = None) -> Conf:
     except tomllib.TOMLDecodeError as e:
         raise ConfError(f"{path}: invalid TOML: {e}") from None
 
+    validate.check_text(raw)
     _only_keys(raw, TOP_KEYS, str(path))
 
     default_version = raw.get("anci-version")
@@ -671,45 +570,12 @@ def _validate(conf: Conf) -> None:
     if not conf.envs:
         raise ConfError("conf must define at least one [env.<name>]")
 
-    # names first: everything below (and every command) builds paths from them
-    for kind, names in (("user", conf.users), ("env", conf.envs),
-                        ("exe", conf.exes), ("db", conf.dbs)):
-        rule = _USER_NAME_RE if kind == "user" else _NAME_RE
-        for name in names:
-            if not rule.match(name):
-                raise ConfError(
-                    f"[{kind}.{name}]: invalid {kind} name",
-                    why=_NAME_WHY[kind],
-                    try_=("use lowercase letters, digits, '_' or '-' (max 32, "
-                          "not starting with a digit or '-')" if kind == "user" else
-                          "start with a letter or digit; then letters, digits, '.', '_' or '-'"),
-                )
-    port_vars: dict[str, str] = {}
-    for name in sorted(conf.exes):
-        other = port_vars.setdefault(port_var(name), name)
-        if other != name:
-            raise ConfError(
-                f"[exe.{name}]: its port variable {port_var(name)} is also [exe.{other}]'s",
-                try_="rename one: names may not differ only in case or in '.', '_', '-'",
-            )
-    for exe in conf.exes.values():
-        if exe.name in RESERVED_EXE_NAMES:
-            raise ConfError(
-                f"[exe.{exe.name}]: '{exe.name}' is reserved "
-                f"(it names one of anci's own systemd units)"
-            )
-
     for env in conf.envs.values():
         if env.adopted and env.ip == "127.0.0.1":
             raise ConfError(
                 f"[env.{env.name}]: mode = 'adopt' needs the box's address, not 127.0.0.1",
                 why="anci would bootstrap your own machine (accounts, sudoers) as the box",
                 try_="set ip to the box's address, or drop 'mode' for a VM on this dev machine",
-            )
-        if env.name in RESERVED_ENV_NAMES:
-            raise ConfError(
-                f"[env.{env.name}]: '{env.name}' is a reserved word "
-                f"(it's an anci command, not an env)"
             )
         hosts: dict[str, str] = {}
         for exe in conf.exes.values():
@@ -731,8 +597,6 @@ def _validate(conf: Conf) -> None:
                 )
             hosts[resolved.host] = exe.name
 
-    # every replica its own place: two writers on one replica corrupt it, and a
-    # restore could bring back another db's (or env's) data
     replicas: dict[tuple, tuple[str, str]] = {}
     for env in conf.envs.values():
         for db in conf.replicated_dbs(env.name):
@@ -747,11 +611,3 @@ def _validate(conf: Conf) -> None:
                          "(each db then gets <env>/<db>)",
                 )
 
-
-_NAME_WHY = {
-    "user": "a user name becomes a Linux account on the box",
-    "env": "an env name becomes paths and commands on the box",
-    "exe": "an exe name becomes its systemd unit and its on-guest path "
-           "(/var/lib/anci-<exe>/<exe>)",
-    "db": "a db name becomes paths and commands on the box",
-}

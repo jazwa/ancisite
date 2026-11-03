@@ -30,7 +30,8 @@ Deploy the previous build.
 ## Good to know
 
 - Only one deploy runs on an env at a time.
-- Deploy returns once the service has restarted, not once it's serving. Check status with the commands below.
+- Deploy waits a few seconds after a restart, then fails if the service isn't running, with the end of its
+  log. A service that fails later, or runs but doesn't answer yet, shows in status.
 
 ## Next steps
 

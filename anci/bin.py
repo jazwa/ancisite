@@ -22,8 +22,6 @@ from . import errors, ui
 
 
 def local_platform() -> str:
-    """This dev machine as `<os>-<arch>` ("macos-aarch64", "linux-x86_64", …) —
-    the names anci's release binaries and anci-install.sh use."""
     system = platform.system()
     os_name = {"Linux": "linux", "Darwin": "macos"}.get(system, system.lower())
     machine = platform.machine().lower()
@@ -40,12 +38,6 @@ def vendor(
     *,
     extract: str | None = None,
 ) -> Path:
-    """Download (once), verify, extract → artifacts_dir/<name>.
-
-    `extract`: member name inside the downloaded archive — a `.tar.gz`
-    (caddy/litestream) or a `.zip` (sqlite-tools), told apart by content.
-    None = the download *is* the artifact.
-    """
     dest = artifacts_dir / name
     if dest.is_file():
         return dest
@@ -66,7 +58,6 @@ def vendor(
 
 
 def _member(archive: Path, name_in_archive: str, url: str, name: str) -> bytes:
-    """The named member's bytes from a `.zip` or `.tar.gz` archive."""
     if zipfile.is_zipfile(archive):
         with zipfile.ZipFile(archive) as zf:
             try:

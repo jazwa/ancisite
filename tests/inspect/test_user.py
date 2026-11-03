@@ -16,7 +16,7 @@ from anci.render import shell
 from .support import load_conf
 from .support import run_probes, write
 
-KEY = "ssh-ed25519 AAAA jack"
+KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIdd5266e9506c16ebf7e12ffa7545d4c41feb0b2322d jack"
 
 
 class TestUser(unittest.TestCase):
